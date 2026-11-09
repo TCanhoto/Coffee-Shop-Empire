@@ -21,6 +21,16 @@ from storage import (
 
 
 st.set_page_config(page_title="Campus Tycoon", page_icon="☕", layout="centered")
+experience = st.sidebar.radio(
+    "Game version",
+    ["Campus Tycoon 1.0", "Campus Tycoon 2.0 · Multiplayer"],
+)
+if experience == "Campus Tycoon 2.0 · Multiplayer":
+    from v2_interface import render as render_v2
+
+    render_v2()
+    st.stop()
+
 run = load_run()
 trade_history = load_trade_history()
 final_results = get_final_results()

@@ -25,6 +25,10 @@ from business_logic import (
 V2_DATABASE_PATH = Path(__file__).resolve().parent / "campus_tycoon_v2.sqlite3"
 DEFAULT_TRADING_DAYS = 7
 DEFAULT_STARTING_BUDGET_CENTS = 200_000
+MIN_TRADING_DAYS = 1
+MAX_TRADING_DAYS = 30
+MIN_STARTING_BUDGET_CENTS = 100
+MAX_STARTING_BUDGET_CENTS = 1_000_000
 SESSION_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 SESSION_CODE_LENGTH = 6
 MAX_SESSION_CODE_ATTEMPTS = 50
@@ -100,7 +104,8 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                 trading_days INTEGER NOT NULL CHECK (trading_days > 0),
                 starting_budget_cents INTEGER NOT NULL CHECK (starting_budget_cents > 0),
                 status TEXT NOT NULL CHECK (status IN ('waiting', 'active', 'finished')),
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                host_credential_hash TEXT
             );
 
             CREATE TABLE IF NOT EXISTS players (
@@ -175,6 +180,16 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
             END;
             """
         )
+        # Phase 1A databases may already exist without host authentication.
+        # This additive migration preserves all existing sessions and players.
+        session_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(game_sessions)")
+        }
+        if "host_credential_hash" not in session_columns:
+            connection.execute(
+                "ALTER TABLE game_sessions ADD COLUMN host_credential_hash TEXT"
+            )
         with connection:
             for product in PRODUCTS:
                 connection.execute(
@@ -204,9 +219,14 @@ def create_game_session(
     """
 
     days = _positive_whole_number(trading_days, "Trading days")
+    if not MIN_TRADING_DAYS <= days <= MAX_TRADING_DAYS:
+        raise ValueError("Trading days must be between 1 and 30.")
     budget_cents = price_to_cents(starting_budget)
+    if not MIN_STARTING_BUDGET_CENTS <= budget_cents <= MAX_STARTING_BUDGET_CENTS:
+        raise ValueError("Starting cash must be between €1.00 and €10,000.00.")
     initialize_v2_database(database_path)
 
+    host_credential = secrets.token_urlsafe(32)
     for _ in range(MAX_SESSION_CODE_ATTEMPTS):
         session_id = str(uuid.uuid4())
         join_code = _new_session_code()
@@ -218,16 +238,27 @@ def create_game_session(
                         """
                         INSERT INTO game_sessions
                             (session_id, join_code, trading_days,
-                             starting_budget_cents, status, created_at)
-                        VALUES (?, ?, ?, ?, 'waiting', ?)
+                             starting_budget_cents, status, created_at,
+                             host_credential_hash)
+                        VALUES (?, ?, ?, ?, 'waiting', ?, ?)
                         """,
-                        (session_id, join_code, days, budget_cents, _now_utc()),
+                        (
+                            session_id,
+                            join_code,
+                            days,
+                            budget_cents,
+                            _now_utc(),
+                            _credential_hash(host_credential),
+                        ),
                     )
         except sqlite3.IntegrityError as error:
             if "join_code" in str(error) or "UNIQUE constraint failed" in str(error):
                 continue
             raise
-        return get_game_session(database_path, session_id)
+        return {
+            **get_game_session(database_path, session_id),
+            "host_credential": host_credential,
+        }
 
     raise RuntimeError("Could not generate a unique session code. Please try again.")
 
@@ -249,6 +280,65 @@ def get_game_session(
     if row is None:
         raise ValueError("Game session was not found.")
     return dict(row)
+
+
+def get_game_session_by_code(
+    database_path: str | Path,
+    join_code: str,
+) -> dict:
+    """Load a public session summary by its six-character joining code."""
+
+    if not isinstance(join_code, str) or len(join_code.strip()) != SESSION_CODE_LENGTH:
+        raise ValueError("Enter a valid six-character session code.")
+    initialize_v2_database(database_path)
+    with _connect(database_path) as connection:
+        row = connection.execute(
+            """SELECT session_id, join_code, trading_days,
+                      starting_budget_cents, status, created_at
+               FROM game_sessions WHERE join_code = ?""",
+            (join_code.strip().upper(),),
+        ).fetchone()
+    if row is None:
+        raise ValueError("Game session was not found.")
+    return dict(row)
+
+
+def authenticate_host(
+    database_path: str | Path,
+    join_code: str,
+    host_credential: str,
+) -> dict:
+    """Verify the private host secret before restoring host controls."""
+
+    session = get_game_session_by_code(database_path, join_code)
+    with _connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT host_credential_hash FROM game_sessions WHERE session_id = ?",
+            (session["session_id"],),
+        ).fetchone()
+    if (
+        row is None
+        or not row["host_credential_hash"]
+        or not isinstance(host_credential, str)
+        or not hmac.compare_digest(
+            row["host_credential_hash"], _credential_hash(host_credential)
+        )
+    ):
+        raise ValueError("Host controls could not be resumed with those credentials.")
+    return session
+
+
+def list_session_players(database_path: str | Path, session_id: str) -> list[dict]:
+    """Return only public lobby details, never player identifiers or credentials."""
+
+    initialize_v2_database(database_path)
+    with _connect(database_path) as connection:
+        rows = connection.execute(
+            """SELECT nickname, created_at FROM players
+               WHERE session_id = ? ORDER BY created_at, nickname_key""",
+            (session_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def join_game_session(
@@ -344,19 +434,28 @@ def join_game_session(
 def start_game_session(
     database_path: str | Path,
     session_id: str,
+    host_credential: str,
 ) -> None:
-    """Mark a waiting session active; the future UI will enforce host access."""
+    """Start a waiting session only after verifying its private host credential."""
 
     initialize_v2_database(database_path)
     with _connect(database_path) as connection:
         with connection:
             connection.execute("BEGIN IMMEDIATE")
             session = connection.execute(
-                "SELECT status FROM game_sessions WHERE session_id = ?",
+                "SELECT status, host_credential_hash FROM game_sessions WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
             if session is None:
                 raise ValueError("Game session was not found.")
+            if (
+                not isinstance(host_credential, str)
+                or not session["host_credential_hash"]
+                or not hmac.compare_digest(
+                    session["host_credential_hash"], _credential_hash(host_credential)
+                )
+            ):
+                raise ValueError("Only the host can start this game.")
             if session["status"] != "waiting":
                 raise ValueError("Only a waiting session can be started.")
             player_count = connection.execute(
@@ -445,6 +544,34 @@ def resume_player(
     return get_player_progress(database_path, session_id, player_id)
 
 
+def resume_player_by_credentials(
+    database_path: str | Path,
+    join_code: str,
+    nickname: str,
+    recovery_credential: str,
+) -> dict:
+    """Resume by public session code, normalized nickname, and private secret."""
+
+    session = get_game_session_by_code(database_path, join_code)
+    _, nickname_key = _normalize_nickname(nickname)
+    with _connect(database_path) as connection:
+        row = connection.execute(
+            """SELECT player_id, recovery_credential_hash FROM players
+               WHERE session_id = ? AND nickname_key = ?""",
+            (session["session_id"], nickname_key),
+        ).fetchone()
+    if (
+        row is None
+        or not isinstance(recovery_credential, str)
+        or not hmac.compare_digest(
+            row["recovery_credential_hash"], _credential_hash(recovery_credential)
+        )
+    ):
+        raise ValueError("Player could not be resumed with those credentials.")
+    progress = get_player_progress(database_path, session["session_id"], row["player_id"])
+    return progress
+
+
 def purchase_player_stock(
     database_path: str | Path,
     session_id: str,
@@ -515,14 +642,25 @@ def trade_player_day(
     database_path: str | Path,
     session_id: str,
     player_id: str,
+    expected_day: object,
 ) -> dict:
-    """Resolve and save one player's day as a single transaction."""
+    """Resolve one specific player day, rejecting stale or repeated submissions.
 
+    The caller sends the day number shown when the player pressed Complete Day.
+    A second tab with the same old day cannot accidentally trade the next day.
+    """
+
+    requested_day = _positive_whole_number(expected_day, "Expected day")
     initialize_v2_database(database_path)
     with _connect(database_path) as connection:
         with connection:
             connection.execute("BEGIN IMMEDIATE")
             player = _require_active_player(connection, session_id, player_id)
+            if player["current_day"] != requested_day:
+                raise ValueError(
+                    "This day was already completed or is no longer current. "
+                    "Refresh to see the latest progress."
+                )
             product_rows = connection.execute(
                 """SELECT p.product_key, p.name, p.purchase_cost_cents,
                           p.reference_price_cents, i.quantity, i.selected_price_cents
