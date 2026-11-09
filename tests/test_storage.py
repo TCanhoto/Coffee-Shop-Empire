@@ -1,6 +1,13 @@
 """Tests for creating and reopening the initial saved game."""
 
-from storage import initialize_database, load_run
+from storage import (
+    initialize_database,
+    load_run,
+    load_trade_history,
+    purchase_stock,
+    set_selling_price,
+    trade_day,
+)
 
 
 def test_first_load_creates_the_initial_run(tmp_path):
@@ -55,3 +62,19 @@ def test_initialization_and_reopening_do_not_reset_existing_run(tmp_path):
     assert run["current_day"] == 3
     assert run["products"][0]["quantity"] == 4
     assert run["products"][0]["selected_price_cents"] == 425
+
+
+def test_startup_initialization_preserves_saved_trade_and_history(tmp_path):
+    database = tmp_path / "game.sqlite3"
+    purchase_stock(database, "coffee", 12)
+    set_selling_price(database, "coffee", "4.01")
+    trade_day(database)
+    saved_run = load_run(database)
+    saved_history = load_trade_history(database)
+
+    # App startup calls initialize_database; it must not replay or reset a trade.
+    initialize_database(database)
+
+    assert load_run(database) == saved_run
+    assert load_trade_history(database) == saved_history
+    assert len(load_trade_history(database)) == 1

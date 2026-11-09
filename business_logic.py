@@ -157,8 +157,34 @@ def calculate_trade(cash_cents: int, products: list[dict]) -> dict:
     }
 
 
+def calculate_final_results(cash_cents: int, products: list[dict]) -> dict:
+    """Value remaining inventory and calculate the overall gain or loss."""
+
+    if type(cash_cents) is not int or cash_cents < 0:
+        raise ValueError("Cash cannot be negative.")
+
+    inventory_value_cents = 0
+    for product in products:
+        quantity = product["quantity"]
+        unit_cost_cents = product["purchase_cost_cents"]
+        if type(quantity) is not int or quantity < 0:
+            raise ValueError("Inventory cannot be negative.")
+        if type(unit_cost_cents) is not int or unit_cost_cents < 0:
+            raise ValueError("Purchase cost cannot be negative.")
+        inventory_value_cents += quantity * unit_cost_cents
+
+    return {
+        "cash_cents": cash_cents,
+        "remaining_stock_value_cents": inventory_value_cents,
+        "overall_gain_loss_cents": (
+            cash_cents + inventory_value_cents - STARTING_CASH_CENTS
+        ),
+    }
+
+
 def format_euros(amount_cents: int) -> str:
     """Turn integer cents into a readable euro amount."""
 
-    euros, cents = divmod(amount_cents, 100)
-    return f"€{euros:,}.{cents:02d}"
+    sign = "-" if amount_cents < 0 else ""
+    euros, cents = divmod(abs(amount_cents), 100)
+    return f"{sign}€{euros:,}.{cents:02d}"

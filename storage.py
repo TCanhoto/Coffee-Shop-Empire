@@ -9,6 +9,7 @@ from business_logic import (
     TOTAL_TRADING_DAYS,
     calculate_trade,
     calculate_purchase,
+    calculate_final_results,
     price_to_cents,
 )
 
@@ -203,7 +204,15 @@ def set_selling_price(
 
     initialize_database(database_path)
     with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("BEGIN IMMEDIATE")
+        run = connection.execute(
+            "SELECT current_day FROM game_run WHERE id = 1"
+        ).fetchone()
+        if run is None:
+            raise ValueError("There is no active run.")
+        if run[0] > TOTAL_TRADING_DAYS:
+            raise ValueError("This run is complete; prices can no longer be changed.")
         cursor = connection.execute(
             "UPDATE inventory SET selected_price_cents = ? WHERE product_key = ?",
             (price_cents, product_key),
@@ -360,3 +369,118 @@ def load_latest_trade(database_path: str | Path = DATABASE_PATH) -> dict | None:
         },
         "cash_cents_after": day_row["cash_cents_after"],
     }
+
+
+def load_trade_history(database_path: str | Path = DATABASE_PATH) -> list[dict]:
+    """Load every completed day, including totals and product-level results."""
+
+    initialize_database(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        day_rows = connection.execute(
+            """
+            SELECT day, cash_cents_after, total_demand, total_units_sold,
+                   total_revenue_cents, total_cost_of_goods_sold_cents,
+                   total_gross_profit_cents
+            FROM trading_days ORDER BY day
+            """
+        ).fetchall()
+        history = []
+        for day_row in day_rows:
+            product_rows = connection.execute(
+                """
+                SELECT r.product_key, p.name, r.demand, r.units_sold,
+                       r.revenue_cents, r.cost_of_goods_sold_cents,
+                       r.gross_profit_cents
+                FROM daily_results AS r
+                JOIN products AS p ON p.product_key = r.product_key
+                WHERE r.day = ?
+                ORDER BY CASE r.product_key
+                    WHEN 'coffee' THEN 1 WHEN 'sandwich' THEN 2 WHEN 'cookie' THEN 3
+                END
+                """,
+                (day_row["day"],),
+            ).fetchall()
+            history.append(
+                {
+                    "day": day_row["day"],
+                    "cash_cents_after": day_row["cash_cents_after"],
+                    "products": [dict(row) for row in product_rows],
+                    "totals": {
+                        "demand": day_row["total_demand"],
+                        "units_sold": day_row["total_units_sold"],
+                        "revenue_cents": day_row["total_revenue_cents"],
+                        "cost_of_goods_sold_cents": day_row[
+                            "total_cost_of_goods_sold_cents"
+                        ],
+                        "gross_profit_cents": day_row[
+                            "total_gross_profit_cents"
+                        ],
+                    },
+                }
+            )
+
+    return history
+
+
+def get_final_results(database_path: str | Path = DATABASE_PATH) -> dict | None:
+    """Return final valuation only after all five trading days are complete."""
+
+    initialize_database(database_path)
+    with sqlite3.connect(database_path) as connection:
+        run = connection.execute(
+            "SELECT cash_cents, current_day FROM game_run WHERE id = 1"
+        ).fetchone()
+        if run is None or run[1] <= TOTAL_TRADING_DAYS:
+            return None
+
+        products = connection.execute(
+            """
+            SELECT p.purchase_cost_cents, i.quantity
+            FROM products AS p
+            JOIN inventory AS i ON i.product_key = p.product_key
+            """
+        ).fetchall()
+
+    return calculate_final_results(
+        run[0],
+        [
+            {"purchase_cost_cents": row[0], "quantity": row[1]}
+            for row in products
+        ],
+    )
+
+
+def reset_run(
+    database_path: str | Path = DATABASE_PATH,
+    *,
+    confirmed: bool,
+) -> bool:
+    """Reset the current run only after explicit confirmation."""
+
+    if not confirmed:
+        return False
+
+    initialize_database(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM daily_results")
+        connection.execute("DELETE FROM trading_days")
+        connection.execute(
+            """
+            UPDATE inventory
+            SET quantity = 0,
+                selected_price_cents = (
+                    SELECT reference_price_cents
+                    FROM products
+                    WHERE products.product_key = inventory.product_key
+                )
+            """
+        )
+        connection.execute(
+            "UPDATE game_run SET cash_cents = ?, current_day = 1 WHERE id = 1",
+            (STARTING_CASH_CENTS,),
+        )
+
+    return True
