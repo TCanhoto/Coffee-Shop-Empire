@@ -37,7 +37,7 @@ def use_test_database(monkeypatch, database):
         lambda *_: real_get_final_results(database),
     )
     app_path = Path(__file__).resolve().parents[1] / "app.py"
-    return AppTest.from_file(app_path).run()
+    return AppTest.from_file(str(app_path)).run()
 
 
 def test_reopening_dashboard_does_not_repeat_saved_trade(tmp_path, monkeypatch):
@@ -101,7 +101,11 @@ def test_ui_confirmation_resets_saved_run_and_history(tmp_path, monkeypatch):
     app = click_button(app, "Confirm New Run")
 
     assert not app.exception
-    assert not any(item.value == "Final results" for item in app.subheader)
+    # A fresh AppTest models the reopened dashboard. Some Streamlit versions
+    # retain elements from prior reruns in the same AppTest tree.
+    reopened_app = use_test_database(monkeypatch, database)
+    assert not reopened_app.exception
+    assert not any(item.value == "Final results" for item in reopened_app.subheader)
     run = real_load_run(database)
     assert run["cash_cents"] == 10_000
     assert run["current_day"] == 1

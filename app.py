@@ -139,7 +139,7 @@ if trade_history:
         }
         for entry in trade_history
     ]
-    st.dataframe(history_rows, hide_index=True, width="stretch")
+    st.dataframe(history_rows, hide_index=True, use_container_width=True)
 
     for entry in trade_history:
         st.markdown(f"**Day {entry['day']} product results**")
@@ -169,7 +169,7 @@ if trade_history:
                 "Gross profit": format_euros(totals["gross_profit_cents"]),
             }
         )
-        st.dataframe(result_rows, hide_index=True, width="stretch")
+        st.dataframe(result_rows, hide_index=True, use_container_width=True)
 
 if final_results is not None:
     st.subheader("Final results")
