@@ -239,3 +239,16 @@ def test_report_refresh_does_not_modify_player_progress_or_history(tmp_path):
     assert v2_storage.load_player_trade_history(
         database, session["session_id"], player["player_id"]
     ) == before_history
+
+
+def test_unsold_stock_recommendation_preserves_euro_cents(tmp_path):
+    database = tmp_path / "report-cents.sqlite3"
+    session, player = started_game(database, days=1)
+    sid, pid = session["session_id"], player["player_id"]
+    v2_storage.set_player_menu(database, sid, pid, ["bica", "pistachio_croissant"], expected_day=1)
+    v2_storage.purchase_player_stock(database, sid, pid, "pistachio_croissant", 191)
+    v2_storage.trade_player_day(database, sid, pid, expected_day=1)
+    report = v2_storage.get_player_final_report(database, sid, pid)
+    assert report["remaining_inventory_value_cents"] == 21_010
+    recommendation = next(r for r in report["recommendations"] if r["rule"] == "unsold_inventory")
+    assert "€210.10" in recommendation["text"]

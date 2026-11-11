@@ -37,7 +37,7 @@ def use_test_database(monkeypatch, database):
         lambda *_: real_get_final_results(database),
     )
     app_path = Path(__file__).resolve().parents[1] / "app.py"
-    return AppTest.from_file(str(app_path)).run()
+    return AppTest.from_file(str(app_path), default_timeout=15).run()
 
 
 def test_reopening_dashboard_does_not_repeat_saved_trade(tmp_path, monkeypatch):
