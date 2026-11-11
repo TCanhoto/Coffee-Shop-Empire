@@ -7,6 +7,7 @@ from threading import Barrier
 import pytest
 
 from storage import DATABASE_PATH, initialize_database
+from content import DEFAULT_MENU_KEYS, MAX_MENU_SIZE, PRODUCT_CATALOGUE
 from v2_storage import (
     authenticate_host,
     create_game_session,
@@ -17,10 +18,13 @@ from v2_storage import (
     join_game_session,
     list_session_players,
     load_player_trade_history,
+    list_locations,
     purchase_player_stock,
     resume_player,
     resume_player_by_credentials,
     set_player_selling_price,
+    set_player_menu,
+    select_player_location,
     start_game_session,
     trade_player_day,
 )
@@ -32,6 +36,16 @@ def make_session(database, **options):
 
 def join(database, session, nickname):
     return join_game_session(database, session["join_code"], nickname)
+
+
+def confirm_location(database, session, player, location="carcavelos_nova_sbe"):
+    return select_player_location(
+        database, session["session_id"], player["player_id"], location
+    )
+
+
+def active_menu(progress):
+    return {product["product_key"] for product in progress["products"] if product["is_active"]}
 
 
 def test_two_separate_sessions_are_created_with_defaults(tmp_path):
@@ -55,6 +69,252 @@ def test_session_settings_are_configurable_and_budget_uses_cents(tmp_path):
 
     assert session["trading_days"] == 12
     assert session["starting_budget_cents"] == 125_075
+
+
+def test_player_menu_is_saved_and_restored_on_resume(tmp_path):
+    database = tmp_path / "game-v2.sqlite3"
+    session = make_session(database)
+    player = join(database, session, "Alex")
+    start_game_session(database, session["session_id"], session["host_credential"])
+    confirm_location(database, session, player)
+    selected = ["bica", "matcha_latte", "brownie", "granola_bowl"]
+
+    assert set_player_menu(
+        database, session["session_id"], player["player_id"], selected, expected_day=1
+    ) == selected
+    initialize_v2_database(database)
+    resumed = resume_player(
+        database,
+        session["session_id"],
+        player["player_id"],
+        player["recovery_credential"],
+    )
+
+    assert active_menu(resumed) == set(selected)
+    assert len(active_menu(resumed)) == 4
+
+
+def test_invalid_menus_are_rejected_without_changing_saved_menu(tmp_path):
+    database = tmp_path / "game-v2.sqlite3"
+    session = make_session(database)
+    player = join(database, session, "Alex")
+    start_game_session(database, session["session_id"], session["host_credential"])
+    before = get_player_progress(database, session["session_id"], player["player_id"])
+    product_keys = [product.key for product in PRODUCT_CATALOGUE]
+
+    invalid_menus = [
+        (product_keys[:11], f"at most {MAX_MENU_SIZE}"),
+        (["bica", "bica"], "more than once"),
+        (["pastel_de_nata", "brownie"], "at least one drink"),
+    ]
+    for choices, message in invalid_menus:
+        with pytest.raises(ValueError, match=message):
+            set_player_menu(
+                database,
+                session["session_id"],
+                player["player_id"],
+                choices,
+                expected_day=1,
+            )
+        assert get_player_progress(
+            database, session["session_id"], player["player_id"]
+        ) == before
+
+    set_player_menu(
+        database,
+        session["session_id"],
+        player["player_id"],
+        product_keys[:MAX_MENU_SIZE],
+        expected_day=1,
+    )
+    assert len(
+        active_menu(get_player_progress(database, session["session_id"], player["player_id"]))
+    ) == MAX_MENU_SIZE
+
+
+def test_menus_are_independent_between_players(tmp_path):
+    database = tmp_path / "game-v2.sqlite3"
+    session = make_session(database)
+    first = join(database, session, "First")
+    second = join(database, session, "Second")
+    start_game_session(database, session["session_id"], session["host_credential"])
+    first_menu = ["oat_flat_white", "plant_based_toastie"]
+    set_player_menu(
+        database, session["session_id"], first["player_id"], first_menu, expected_day=1
+    )
+
+    assert active_menu(
+        get_player_progress(database, session["session_id"], first["player_id"])
+    ) == set(first_menu)
+    assert active_menu(
+        get_player_progress(database, session["session_id"], second["player_id"])
+    ) == set(DEFAULT_MENU_KEYS)
+
+
+def test_removing_menu_item_preserves_its_stock_and_does_not_rewrite_history(tmp_path):
+    database = tmp_path / "game-v2.sqlite3"
+    session = make_session(database, trading_days=3)
+    player = join(database, session, "Alex")
+    start_game_session(database, session["session_id"], session["host_credential"])
+    confirm_location(database, session, player)
+    set_player_menu(
+        database,
+        session["session_id"],
+        player["player_id"],
+        ["bica", "brownie"],
+        expected_day=1,
+    )
+    purchase_player_stock(database, session["session_id"], player["player_id"], "brownie", 2)
+    purchase_player_stock(database, session["session_id"], player["player_id"], "bica", 3)
+    set_player_menu(
+        database,
+        session["session_id"],
+        player["player_id"],
+        ["bica"],
+        expected_day=1,
+    )
+    with pytest.raises(ValueError, match="not in this player's active menu"):
+        purchase_player_stock(
+            database, session["session_id"], player["player_id"], "brownie", 1
+        )
+    with pytest.raises(ValueError, match="not in this player's active menu"):
+        set_player_selling_price(
+            database, session["session_id"], player["player_id"], "brownie", "2.75"
+        )
+
+    first_day = trade_player_day(
+        database, session["session_id"], player["player_id"], expected_day=1
+    )
+    assert [row["product_key"] for row in first_day["products"]] == ["bica"]
+    progress_after_trade = get_player_progress(
+        database, session["session_id"], player["player_id"]
+    )
+    brownie = next(row for row in progress_after_trade["products"] if row["product_key"] == "brownie")
+    assert brownie["quantity"] == 2
+    assert brownie["is_active"] is False
+    history_before_menu_edit = load_player_trade_history(
+        database, session["session_id"], player["player_id"]
+    )
+    with pytest.raises(ValueError, match="trading day changed"):
+        set_player_menu(
+            database,
+            session["session_id"],
+            player["player_id"],
+            ["bica"],
+            expected_day=1,
+        )
+    assert active_menu(
+        get_player_progress(database, session["session_id"], player["player_id"])
+    ) == {"bica"}
+
+    set_player_menu(
+        database,
+        session["session_id"],
+        player["player_id"],
+        ["bica", "brownie"],
+        expected_day=2,
+    )
+    assert load_player_trade_history(
+        database, session["session_id"], player["player_id"]
+    ) == history_before_menu_edit
+
+
+@pytest.mark.parametrize("invalid_price", ["0", "-0.01", "1.234", "invalid"])
+def test_invalid_prices_are_rejected_without_state_changes(tmp_path, invalid_price):
+    database = tmp_path / "game-v2.sqlite3"
+    session = make_session(database)
+    player = join(database, session, "Alex")
+    start_game_session(database, session["session_id"], session["host_credential"])
+    before = get_player_progress(database, session["session_id"], player["player_id"])
+
+    with pytest.raises(ValueError):
+        set_player_selling_price(
+            database, session["session_id"], player["player_id"], "bica", invalid_price
+        )
+
+    assert get_player_progress(database, session["session_id"], player["player_id"]) == before
+
+
+def test_fixed_lisbon_location_data_and_persona_mix_totals(tmp_path):
+    locations = list_locations(tmp_path / "game-v2.sqlite3")
+
+    assert [
+        (
+            location["name"],
+            location["passers_by_per_day"],
+            location["rent_per_day_cents"],
+            location["persona_mix"],
+        )
+        for location in locations
+    ] == [
+        ("Carcavelos / Nova SBE", 1200, 3000, (20, 15, 5, 10, 50)),
+        ("Chiado", 3000, 8000, (15, 15, 45, 15, 10)),
+        ("Príncipe Real", 1500, 6000, (30, 35, 20, 10, 5)),
+        ("Belém", 2500, 5500, (5, 10, 60, 25, 0)),
+    ]
+    assert all(sum(location["persona_mix"]) == 100 for location in locations)
+
+
+def test_players_select_independent_locations_and_choice_persists(tmp_path):
+    database = tmp_path / "game-v2.sqlite3"
+    session = make_session(database)
+    first = join(database, session, "First")
+    second = join(database, session, "Second")
+    start_game_session(database, session["session_id"], session["host_credential"])
+
+    confirm_location(database, session, first, "chiado")
+    assert get_player_progress(
+        database, session["session_id"], second["player_id"]
+    )["location"] is None
+    confirm_location(database, session, second, "belem")
+
+    first_after_reopen = resume_player(
+        database,
+        session["session_id"],
+        first["player_id"],
+        first["recovery_credential"],
+    )
+    second_after_reopen = get_player_progress(
+        database, session["session_id"], second["player_id"]
+    )
+    assert first_after_reopen["location"]["name"] == "Chiado"
+    assert second_after_reopen["location"]["name"] == "Belém"
+    assert first_after_reopen["cash_cents"] == second_after_reopen["cash_cents"]
+    assert first_after_reopen["products"] == second_after_reopen["products"]
+
+
+def test_confirmed_location_cannot_be_changed_or_overwritten(tmp_path):
+    database = tmp_path / "game-v2.sqlite3"
+    session = make_session(database)
+    player = join(database, session, "Alex")
+    start_game_session(database, session["session_id"], session["host_credential"])
+    confirm_location(database, session, player, "chiado")
+    before = get_player_progress(database, session["session_id"], player["player_id"])
+
+    with pytest.raises(ValueError, match="already confirmed"):
+        confirm_location(database, session, player, "belem")
+
+    assert get_player_progress(database, session["session_id"], player["player_id"]) == before
+    with sqlite3.connect(database) as connection:
+        with pytest.raises(sqlite3.IntegrityError, match="cannot be changed"):
+            connection.execute(
+                "UPDATE player_locations SET location_key = 'belem' WHERE player_id = ?",
+                (player["player_id"],),
+            )
+
+
+def test_trade_is_rejected_before_location_confirmation_without_changes(tmp_path):
+    database = tmp_path / "game-v2.sqlite3"
+    session = make_session(database)
+    player = join(database, session, "Alex")
+    start_game_session(database, session["session_id"], session["host_credential"])
+    before = get_player_progress(database, session["session_id"], player["player_id"])
+
+    with pytest.raises(ValueError, match="location before trading"):
+        trade_player_day(database, session["session_id"], player["player_id"], expected_day=1)
+
+    assert get_player_progress(database, session["session_id"], player["player_id"]) == before
+    assert load_player_trade_history(database, session["session_id"], player["player_id"]) == []
 
 
 @pytest.mark.parametrize(
@@ -206,9 +466,11 @@ def test_players_have_independent_cash_inventory_and_trade_history(tmp_path):
     first = join(database, session, "First")
     second = join(database, session, "Second")
     start_game_session(database, session["session_id"], session["host_credential"])
+    confirm_location(database, session, first)
+    confirm_location(database, session, second)
 
     purchase_player_stock(
-        database, session["session_id"], first["player_id"], "coffee", 10
+        database, session["session_id"], first["player_id"], "bica", 10
     )
     first_before_trade = get_player_progress(
         database, session["session_id"], first["player_id"]
@@ -217,12 +479,12 @@ def test_players_have_independent_cash_inventory_and_trade_history(tmp_path):
         database, session["session_id"], second["player_id"]
     )
     first_coffee_before_trade = next(
-        p for p in first_before_trade["products"] if p["product_key"] == "coffee"
+        p for p in first_before_trade["products"] if p["product_key"] == "bica"
     )
     second_coffee_before_trade = next(
-        p for p in second_before_trade["products"] if p["product_key"] == "coffee"
+        p for p in second_before_trade["products"] if p["product_key"] == "bica"
     )
-    assert first_before_trade["cash_cents"] == 198_000
+    assert first_before_trade["cash_cents"] == 199_800
     assert first_coffee_before_trade["quantity"] == 10
     assert second_before_trade["cash_cents"] == 200_000
     assert second_coffee_before_trade["quantity"] == 0
@@ -235,10 +497,10 @@ def test_players_have_independent_cash_inventory_and_trade_history(tmp_path):
     second_progress = get_player_progress(
         database, session["session_id"], second["player_id"]
     )
-    first_coffee = next(p for p in first_progress["products"] if p["product_key"] == "coffee")
-    second_coffee = next(p for p in second_progress["products"] if p["product_key"] == "coffee")
+    first_coffee = next(p for p in first_progress["products"] if p["product_key"] == "bica")
+    second_coffee = next(p for p in second_progress["products"] if p["product_key"] == "bica")
 
-    assert first_progress["cash_cents"] == 202_000
+    assert first_progress["cash_cents"] == 197_700
     assert first_progress["current_day"] == 2
     assert first_coffee["quantity"] == 0
     assert second_progress["cash_cents"] == 200_000
@@ -256,18 +518,18 @@ def test_price_changes_are_isolated_between_players(tmp_path):
     start_game_session(database, session["session_id"], session["host_credential"])
 
     set_player_selling_price(
-        database, session["session_id"], first["player_id"], "coffee", "5.25"
+        database, session["session_id"], first["player_id"], "bica", "5.25"
     )
     first_coffee = next(
         row for row in get_player_progress(database, session["session_id"], first["player_id"])["products"]
-        if row["product_key"] == "coffee"
+        if row["product_key"] == "bica"
     )
     second_coffee = next(
         row for row in get_player_progress(database, session["session_id"], second["player_id"])["products"]
-        if row["product_key"] == "coffee"
+        if row["product_key"] == "bica"
     )
     assert first_coffee["selected_price_cents"] == 525
-    assert second_coffee["selected_price_cents"] == 400
+    assert second_coffee["selected_price_cents"] == 90
 
 
 def test_player_action_cannot_target_another_session_player(tmp_path):
@@ -282,7 +544,7 @@ def test_player_action_cannot_target_another_session_player(tmp_path):
 
     with pytest.raises(ValueError, match="not found"):
         purchase_player_stock(
-            database, first_session["session_id"], player["player_id"], "coffee", 1
+            database, first_session["session_id"], player["player_id"], "bica", 1
         )
 
     after = get_player_progress(database, second_session["session_id"], player["player_id"])
@@ -294,9 +556,10 @@ def test_progress_and_history_survive_reopening_and_recovery_is_verified(tmp_pat
     session = make_session(database)
     player = join(database, session, "Alex")
     start_game_session(database, session["session_id"], session["host_credential"])
-    purchase_player_stock(database, session["session_id"], player["player_id"], "coffee", 3)
+    confirm_location(database, session, player)
+    purchase_player_stock(database, session["session_id"], player["player_id"], "bica", 3)
     set_player_selling_price(
-        database, session["session_id"], player["player_id"], "coffee", "4.25"
+        database, session["session_id"], player["player_id"], "bica", "1.20"
     )
     trade_player_day(database, session["session_id"], player["player_id"], expected_day=1)
 
@@ -308,17 +571,59 @@ def test_progress_and_history_survive_reopening_and_recovery_is_verified(tmp_pat
         player["recovery_credential"],
     )
     history = load_player_trade_history(database, session["session_id"], player["player_id"])
-    coffee = next(p for p in resumed["products"] if p["product_key"] == "coffee")
+    coffee = next(p for p in resumed["products"] if p["product_key"] == "bica")
 
-    assert resumed["cash_cents"] == 200_675
+    assert resumed["cash_cents"] == 197_300
     assert resumed["current_day"] == 2
     assert coffee["quantity"] == 0
-    assert coffee["selected_price_cents"] == 425
+    assert coffee["selected_price_cents"] == 120
     assert len(history) == 1
     assert history[0]["day"] == 1
 
     with pytest.raises(ValueError, match="could not be resumed"):
         resume_player(database, session["session_id"], player["player_id"], "wrong-token")
+
+
+def test_approved_demand_example_is_traded_and_customer_counts_are_saved(tmp_path):
+    database = tmp_path / "game-v2.sqlite3"
+    session = make_session(database)
+    player = join(database, session, "Alex")
+    start_game_session(database, session["session_id"], session["host_credential"])
+    confirm_location(database, session, player, "carcavelos_nova_sbe")
+    keys = ["bica", "galao", "pastel_de_nata", "brownie"]
+    set_player_menu(
+        database, session["session_id"], player["player_id"], keys, expected_day=1
+    )
+    for product_key, units in zip(keys, (66, 36, 35, 26), strict=True):
+        purchase_player_stock(
+            database, session["session_id"], player["player_id"], product_key, units
+        )
+
+    trade = trade_player_day(
+        database, session["session_id"], player["player_id"], expected_day=1
+    )
+    rows = {item["product_key"]: item for item in trade["products"]}
+    assert {key: rows[key]["demand"] for key in keys} == {
+        "bica": 66,
+        "galao": 36,
+        "pastel_de_nata": 35,
+        "brownie": 26,
+    }
+    assert trade["potential_visitors"] == 120
+    assert trade["customers_served"] == 102
+    assert trade["lost_visitors"] == 18
+    assert trade["food_buyer_slots"] == 61
+    assert trade["food_opportunities_not_fulfilled"] == 0
+
+    initialize_v2_database(database)
+    history = load_player_trade_history(
+        database, session["session_id"], player["player_id"]
+    )
+    assert len(history) == 1
+    assert history[0]["potential_visitors"] == 120
+    assert history[0]["customers_served"] == 102
+    assert history[0]["lost_visitors"] == 18
+    assert history[0]["food_buyer_slots"] == 61
 
 
 def test_recovery_credential_is_stored_as_a_hash(tmp_path):
@@ -342,12 +647,14 @@ def test_session_finishes_after_each_player_completes_and_ids_are_immutable(tmp_
     first = join(database, session, "First")
     second = join(database, session, "Second")
     start_game_session(database, session["session_id"], session["host_credential"])
+    confirm_location(database, session, first)
+    confirm_location(database, session, second)
 
     trade_player_day(database, session["session_id"], first["player_id"], expected_day=1)
     assert get_game_session(database, session["session_id"])["status"] == "active"
     with pytest.raises(ValueError, match="completed all trading days"):
         purchase_player_stock(
-            database, session["session_id"], first["player_id"], "coffee", 1
+            database, session["session_id"], first["player_id"], "bica", 1
         )
     with pytest.raises(ValueError, match="completed all trading days"):
         trade_player_day(
@@ -357,9 +664,9 @@ def test_session_finishes_after_each_player_completes_and_ids_are_immutable(tmp_
     assert get_game_session(database, session["session_id"])["status"] == "finished"
     first_progress = get_player_progress(database, session["session_id"], first["player_id"])
     assert first_progress["current_day"] == 2
-    with pytest.raises(ValueError, match="not active"):
-        purchase_player_stock(database, session["session_id"], first["player_id"], "coffee", 1)
-    with pytest.raises(ValueError, match="not active"):
+    with pytest.raises(ValueError, match="completed all trading days"):
+        purchase_player_stock(database, session["session_id"], first["player_id"], "bica", 1)
+    with pytest.raises(ValueError, match="completed all trading days"):
         trade_player_day(database, session["session_id"], first["player_id"], expected_day=2)
 
     with sqlite3.connect(database) as connection:
@@ -375,6 +682,7 @@ def test_repeated_stale_day_submission_does_not_complete_the_next_day(tmp_path):
     session = make_session(database, trading_days=3)
     player = join(database, session, "Alex")
     start_game_session(database, session["session_id"], session["host_credential"])
+    confirm_location(database, session, player)
     first = trade_player_day(
         database, session["session_id"], player["player_id"], expected_day=1
     )
@@ -396,6 +704,7 @@ def test_two_simultaneous_day_submissions_commit_exactly_one_result(tmp_path):
     session = make_session(database, trading_days=3)
     player = join(database, session, "Alex")
     start_game_session(database, session["session_id"], session["host_credential"])
+    confirm_location(database, session, player)
     initialize_v2_database(database)
     barrier = Barrier(2)
 
@@ -428,12 +737,12 @@ def test_invalid_waiting_and_price_actions_leave_player_data_unchanged(tmp_path)
     player = join(database, session, "Alex")
     before = get_player_progress(database, session["session_id"], player["player_id"])
     with pytest.raises(ValueError, match="not active"):
-        purchase_player_stock(database, session["session_id"], player["player_id"], "coffee", 1)
+        purchase_player_stock(database, session["session_id"], player["player_id"], "bica", 1)
     start_game_session(database, session["session_id"], session["host_credential"])
     before = get_player_progress(database, session["session_id"], player["player_id"])
     with pytest.raises(ValueError):
         set_player_selling_price(
-            database, session["session_id"], player["player_id"], "coffee", "not a price"
+            database, session["session_id"], player["player_id"], "bica", "not a price"
         )
     assert get_player_progress(database, session["session_id"], player["player_id"]) == before
 
@@ -466,7 +775,7 @@ def test_rejected_purchase_does_not_partially_change_player_state(tmp_path):
 
     with pytest.raises(ValueError, match="afford"):
         purchase_player_stock(
-            database, session["session_id"], player["player_id"], "coffee", 6
+            database, session["session_id"], player["player_id"], "bica", 51
         )
 
     after = get_player_progress(database, session["session_id"], player["player_id"])

@@ -6,6 +6,9 @@ avoids tiny rounding errors that can happen with ordinary decimal fractions.
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from collections.abc import Mapping
+
+from demand_engine import calculate_v2_demand
 
 
 @dataclass(frozen=True)
@@ -22,6 +25,28 @@ PRODUCTS = (
     Product("coffee", "Coffee", 200, 400),
     Product("sandwich", "Sandwich", 300, 600),
     Product("cookie", "Cookie", 100, 200),
+)
+
+
+@dataclass(frozen=True)
+class Location:
+    """A fictional V2 café location and its planned customer composition."""
+
+    key: str
+    name: str
+    description: str
+    passers_by_per_day: int
+    rent_per_day_cents: int
+    persona_mix: tuple[int, int, int, int, int]
+
+
+# Persona percentages are stored as game data for later demand work. The player
+# interface deliberately shows only the location's traffic and rent.
+LOCATIONS = (
+    Location("carcavelos_nova_sbe", "Carcavelos / Nova SBE", "A campus location with a strong student presence.", 1200, 3000, (20, 15, 5, 10, 50)),
+    Location("chiado", "Chiado", "A busy central district popular with shoppers and visitors.", 3000, 8000, (15, 15, 45, 15, 10)),
+    Location("principe_real", "Príncipe Real", "A lively neighbourhood with residents and café visitors.", 1500, 6000, (30, 35, 20, 10, 5)),
+    Location("belem", "Belém", "A historic riverside area that attracts many visitors.", 2500, 5500, (5, 10, 60, 25, 0)),
 )
 
 STARTING_CASH_CENTS = 10_000
@@ -97,6 +122,73 @@ def calculate_demand(selling_price_cents: int, reference_price_cents: int) -> in
     if selling_price_cents <= 2 * reference_price_cents:
         return 5
     return 0
+
+
+def calculate_v2_trade(
+    cash_cents: int,
+    location: Mapping[str, object],
+    products: list[dict],
+) -> dict:
+    """Calculate V2 sales, rent settlement, and cash without changing state."""
+
+    if type(cash_cents) is not int or cash_cents < 0:
+        raise ValueError("Cash cannot be negative.")
+    rent_due_cents = location.get("rent_per_day_cents")
+    if type(rent_due_cents) is not int or rent_due_cents < 0:
+        raise ValueError("Daily rent must be a non-negative whole amount in cents.")
+    demand = calculate_v2_demand(location, products)
+    by_key = {product["product_key"]: product for product in products}
+    results = []
+    totals = {
+        "demand": 0,
+        "units_sold": 0,
+        "revenue_cents": 0,
+        "cost_of_goods_sold_cents": 0,
+        "gross_profit_cents": 0,
+    }
+    for key, demand_row in demand["products"].items():
+        product = by_key[key]
+        sold = min(demand_row["demand"], product["quantity"])
+        revenue = sold * product["selected_price_cents"]
+        cost = sold * product["purchase_cost_cents"]
+        item = {
+            "product_key": key,
+            "name": product.get("name", key),
+            "is_drink": product["is_drink"],
+            "demand": demand_row["demand"],
+            "units_sold": sold,
+            "revenue_cents": revenue,
+            "cost_of_goods_sold_cents": cost,
+            "gross_profit_cents": revenue - cost,
+            "remaining_quantity": product["quantity"] - sold,
+        }
+        results.append(item)
+        for total_key in totals:
+            totals[total_key] += item[total_key]
+
+    food_sold = sum(
+        item["units_sold"] for item in results if not item["is_drink"]
+    )
+    cash_after_sales_cents = cash_cents + totals["revenue_cents"]
+    rent_paid_cents = min(cash_after_sales_cents, rent_due_cents)
+    rent_shortfall_cents = rent_due_cents - rent_paid_cents
+    return {
+        "products": results,
+        "totals": totals,
+        "cash_cents_after": cash_after_sales_cents - rent_paid_cents,
+        "rent_due_cents": rent_due_cents,
+        "rent_paid_cents": rent_paid_cents,
+        "rent_shortfall_cents": rent_shortfall_cents,
+        "bankrupt": rent_shortfall_cents > 0,
+        "potential_visitors": demand["potential_visitors"],
+        "persona_visitors": demand["persona_visitors"],
+        "customers_served": demand["customers_served"],
+        "lost_visitors": demand["lost_visitors"],
+        "food_buyer_slots": demand["food_buyer_slots"],
+        "food_opportunities_not_fulfilled": demand["food_buyer_slots"] - food_sold,
+        "demand_by_persona": demand["demand_by_persona"],
+        "served_customers_by_persona": demand["served_customers_by_persona"],
+    }
 
 
 def calculate_trade(cash_cents: int, products: list[dict]) -> dict:

@@ -9,15 +9,17 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import hmac
+import json
 from pathlib import Path
 import secrets
 import sqlite3
 import uuid
 
+from content import DEFAULT_MENU_KEYS, MAX_MENU_SIZE, PRODUCT_CATALOGUE
 from business_logic import (
-    PRODUCTS,
+    LOCATIONS,
     calculate_purchase,
-    calculate_trade,
+    calculate_v2_trade,
     price_to_cents,
 )
 
@@ -86,7 +88,7 @@ def _credential_hash(credential: str) -> str:
 
 
 def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None:
-    """Create V2 tables and seed the V1 products without touching the V1 file."""
+    """Create V2 tables and seed catalogues without touching the V1 file."""
 
     with _connect(database_path) as connection:
         connection.executescript(
@@ -95,7 +97,24 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                 product_key TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 purchase_cost_cents INTEGER NOT NULL CHECK (purchase_cost_cents >= 0),
-                reference_price_cents INTEGER NOT NULL CHECK (reference_price_cents > 0)
+                reference_price_cents INTEGER NOT NULL CHECK (reference_price_cents > 0),
+                category TEXT NOT NULL DEFAULT 'Legacy',
+                is_drink INTEGER NOT NULL DEFAULT 0 CHECK (is_drink IN (0, 1))
+            );
+
+            CREATE TABLE IF NOT EXISTS locations (
+                location_key TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                passers_by_per_day INTEGER NOT NULL CHECK (passers_by_per_day >= 0),
+                rent_per_day_cents INTEGER NOT NULL CHECK (rent_per_day_cents >= 0),
+                nomad_percentage INTEGER NOT NULL CHECK (nomad_percentage BETWEEN 0 AND 100),
+                healthy_percentage INTEGER NOT NULL CHECK (healthy_percentage BETWEEN 0 AND 100),
+                tourist_percentage INTEGER NOT NULL CHECK (tourist_percentage BETWEEN 0 AND 100),
+                local_percentage INTEGER NOT NULL CHECK (local_percentage BETWEEN 0 AND 100),
+                student_percentage INTEGER NOT NULL CHECK (student_percentage BETWEEN 0 AND 100),
+                CHECK (nomad_percentage + healthy_percentage + tourist_percentage +
+                       local_percentage + student_percentage = 100)
             );
 
             CREATE TABLE IF NOT EXISTS game_sessions (
@@ -118,6 +137,7 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                 starting_cash_cents INTEGER NOT NULL CHECK (starting_cash_cents > 0),
                 cash_cents INTEGER NOT NULL CHECK (cash_cents >= 0),
                 current_day INTEGER NOT NULL CHECK (current_day > 0),
+                is_bankrupt INTEGER NOT NULL DEFAULT 0 CHECK (is_bankrupt IN (0, 1)),
                 created_at TEXT NOT NULL,
                 UNIQUE (session_id, nickname_key),
                 UNIQUE (session_id, player_id)
@@ -134,6 +154,32 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                     REFERENCES players(session_id, player_id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS player_menu (
+                session_id TEXT NOT NULL,
+                player_id TEXT NOT NULL,
+                product_key TEXT NOT NULL,
+                PRIMARY KEY (session_id, player_id, product_key),
+                FOREIGN KEY (session_id, player_id, product_key)
+                    REFERENCES player_inventory(session_id, player_id, product_key)
+                    ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS player_locations (
+                session_id TEXT NOT NULL,
+                player_id TEXT NOT NULL,
+                location_key TEXT NOT NULL REFERENCES locations(location_key),
+                selected_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, player_id),
+                FOREIGN KEY (session_id, player_id)
+                    REFERENCES players(session_id, player_id) ON DELETE CASCADE
+            );
+
+            CREATE TRIGGER IF NOT EXISTS player_location_is_immutable
+            BEFORE UPDATE ON player_locations
+            BEGIN
+                SELECT RAISE(ABORT, 'confirmed player location cannot be changed');
+            END;
+
             CREATE TABLE IF NOT EXISTS player_trading_days (
                 session_id TEXT NOT NULL,
                 player_id TEXT NOT NULL,
@@ -144,6 +190,16 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                 total_revenue_cents INTEGER NOT NULL,
                 total_cost_of_goods_sold_cents INTEGER NOT NULL,
                 total_gross_profit_cents INTEGER NOT NULL,
+                potential_visitors INTEGER NOT NULL DEFAULT 0,
+                customers_served INTEGER NOT NULL DEFAULT 0,
+                lost_visitors INTEGER NOT NULL DEFAULT 0,
+                food_buyer_slots INTEGER NOT NULL DEFAULT 0,
+                food_opportunities_not_fulfilled INTEGER NOT NULL DEFAULT 0,
+                rent_due_cents INTEGER NOT NULL DEFAULT 0 CHECK (rent_due_cents >= 0),
+                rent_paid_cents INTEGER NOT NULL DEFAULT 0 CHECK (rent_paid_cents >= 0),
+                rent_shortfall_cents INTEGER NOT NULL DEFAULT 0 CHECK (rent_shortfall_cents >= 0),
+                bankrupt INTEGER NOT NULL DEFAULT 0 CHECK (bankrupt IN (0, 1)),
+                served_customers_by_persona_json TEXT,
                 PRIMARY KEY (session_id, player_id, day_number),
                 FOREIGN KEY (session_id, player_id)
                     REFERENCES players(session_id, player_id) ON DELETE CASCADE
@@ -190,21 +246,113 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
             connection.execute(
                 "ALTER TABLE game_sessions ADD COLUMN host_credential_hash TEXT"
             )
+        player_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(players)")
+        }
+        if "is_bankrupt" not in player_columns:
+            connection.execute(
+                "ALTER TABLE players ADD COLUMN is_bankrupt INTEGER NOT NULL DEFAULT 0"
+            )
+        product_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(products)")
+        }
+        if "category" not in product_columns:
+            connection.execute(
+                "ALTER TABLE products ADD COLUMN category TEXT NOT NULL DEFAULT 'Legacy'"
+            )
+        if "is_drink" not in product_columns:
+            connection.execute(
+                "ALTER TABLE products ADD COLUMN is_drink INTEGER NOT NULL DEFAULT 0"
+            )
+        trading_day_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(player_trading_days)")
+        }
+        for column in (
+            "potential_visitors",
+            "customers_served",
+            "lost_visitors",
+            "food_buyer_slots",
+            "food_opportunities_not_fulfilled",
+            "rent_due_cents",
+            "rent_paid_cents",
+            "rent_shortfall_cents",
+            "bankrupt",
+        ):
+            if column not in trading_day_columns:
+                connection.execute(
+                    f"ALTER TABLE player_trading_days ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                )
+        if "served_customers_by_persona_json" not in trading_day_columns:
+            connection.execute(
+                "ALTER TABLE player_trading_days "
+                "ADD COLUMN served_customers_by_persona_json TEXT"
+            )
         with connection:
-            for product in PRODUCTS:
+            for location in LOCATIONS:
+                connection.execute(
+                    """INSERT OR IGNORE INTO locations
+                       (location_key, name, description, passers_by_per_day,
+                        rent_per_day_cents, nomad_percentage, healthy_percentage,
+                        tourist_percentage, local_percentage, student_percentage)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        location.key,
+                        location.name,
+                        location.description,
+                        location.passers_by_per_day,
+                        location.rent_per_day_cents,
+                        *location.persona_mix,
+                    ),
+                )
+            for product in PRODUCT_CATALOGUE:
                 connection.execute(
                     """
                     INSERT OR IGNORE INTO products
-                        (product_key, name, purchase_cost_cents, reference_price_cents)
-                    VALUES (?, ?, ?, ?)
+                        (product_key, name, purchase_cost_cents,
+                         reference_price_cents, category, is_drink)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         product.key,
                         product.name,
                         product.purchase_cost_cents,
                         product.reference_price_cents,
+                        product.category,
+                        int(product.is_drink),
                     ),
                 )
+            # Add the new catalog rows and a valid starter menu to players saved
+            # by earlier V2 versions. INSERT OR IGNORE preserves their stock.
+            existing_players = connection.execute(
+                "SELECT session_id, player_id FROM players"
+            ).fetchall()
+            for player in existing_players:
+                for product in PRODUCT_CATALOGUE:
+                    connection.execute(
+                        """INSERT OR IGNORE INTO player_inventory
+                           (session_id, player_id, product_key, quantity,
+                            selected_price_cents)
+                           VALUES (?, ?, ?, 0, ?)""",
+                        (
+                            player["session_id"],
+                            player["player_id"],
+                            product.key,
+                            product.reference_price_cents,
+                        ),
+                    )
+                has_menu = connection.execute(
+                    """SELECT 1 FROM player_menu
+                       WHERE session_id = ? AND player_id = ? LIMIT 1""",
+                    (player["session_id"], player["player_id"]),
+                ).fetchone()
+                if has_menu is None:
+                    for product_key in DEFAULT_MENU_KEYS:
+                        connection.execute(
+                            """INSERT OR IGNORE INTO player_menu
+                               (session_id, player_id, product_key)
+                               VALUES (?, ?, ?)""",
+                            (player["session_id"], player["player_id"], product_key),
+                        )
 
 
 def create_game_session(
@@ -341,6 +489,80 @@ def list_session_players(database_path: str | Path, session_id: str) -> list[dic
     return [dict(row) for row in rows]
 
 
+def get_session_leaderboard(
+    database_path: str | Path, session_id: str
+) -> dict:
+    """Return one session's public standings without exposing player IDs.
+
+    Result descends first, then total recorded revenue descends. The immutable
+    player UUID is the final ascending sort key, but is deliberately not
+    returned to the caller or shown in the interface.
+    """
+
+    initialize_v2_database(database_path)
+    with _connect(database_path) as connection:
+        session = connection.execute(
+            "SELECT status, trading_days FROM game_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if session is None:
+            raise ValueError("Game session was not found.")
+        rows = connection.execute(
+            """SELECT p.player_id, p.nickname, p.starting_cash_cents,
+                      p.cash_cents, p.current_day, p.is_bankrupt,
+                      l.name AS location,
+                      COUNT(DISTINCT d.day_number) AS completed_days,
+                      COALESCE(SUM(d.total_revenue_cents), 0) AS total_revenue_cents
+               FROM players AS p
+               LEFT JOIN player_locations AS pl
+                 ON pl.session_id = p.session_id AND pl.player_id = p.player_id
+               LEFT JOIN locations AS l ON l.location_key = pl.location_key
+               LEFT JOIN player_trading_days AS d
+                 ON d.session_id = p.session_id AND d.player_id = p.player_id
+               WHERE p.session_id = ?
+               GROUP BY p.player_id, p.nickname, p.starting_cash_cents,
+                        p.cash_cents, p.current_day, p.is_bankrupt, l.name""",
+            (session_id,),
+        ).fetchall()
+
+    standings = []
+    for row in rows:
+        finished = bool(row["is_bankrupt"]) or row["current_day"] > session[
+            "trading_days"
+        ]
+        standings.append(
+            {
+                "_stable_id": row["player_id"],
+                "nickname": row["nickname"],
+                "location": row["location"] or "Not selected",
+                "completed_days": row["completed_days"],
+                "game_result_cents": row["cash_cents"]
+                - row["starting_cash_cents"],
+                "total_revenue_cents": row["total_revenue_cents"],
+                "status": "Finished" if finished else "Playing",
+            }
+        )
+    standings.sort(
+        key=lambda item: (
+            -item["game_result_cents"],
+            -item["total_revenue_cents"],
+            item["_stable_id"],
+        )
+    )
+    public_rows = []
+    for rank, item in enumerate(standings, start=1):
+        public_rows.append(
+            {
+                "rank": rank,
+                **{key: value for key, value in item.items() if key != "_stable_id"},
+            }
+        )
+    return {
+        "is_final": session["status"] == "finished",
+        "players": public_rows,
+    }
+
+
 def join_game_session(
     database_path: str | Path,
     join_code: str,
@@ -403,7 +625,7 @@ def join_game_session(
                     ),
                 )
 
-                for product in PRODUCTS:
+                for product in PRODUCT_CATALOGUE:
                     connection.execute(
                         """INSERT INTO player_inventory
                             (session_id, player_id, product_key, quantity,
@@ -415,6 +637,12 @@ def join_game_session(
                             product.key,
                             product.reference_price_cents,
                         ),
+                    )
+                for product_key in DEFAULT_MENU_KEYS:
+                    connection.execute(
+                        """INSERT INTO player_menu
+                           (session_id, player_id, product_key) VALUES (?, ?, ?)""",
+                        (session["session_id"], player_id, product_key),
                     )
     except sqlite3.IntegrityError as error:
         if "players.session_id, players.nickname_key" in str(error):
@@ -477,6 +705,7 @@ def _require_active_player(
 ) -> sqlite3.Row:
     row = connection.execute(
         """SELECT p.session_id, p.player_id, p.cash_cents, p.current_day,
+                  p.is_bankrupt,
                   s.trading_days, s.status
            FROM players AS p
            JOIN game_sessions AS s ON s.session_id = p.session_id
@@ -485,11 +714,82 @@ def _require_active_player(
     ).fetchone()
     if row is None:
         raise ValueError("Player was not found in this game session.")
-    if row["status"] != "active":
-        raise ValueError("This game session is not active.")
+    if row["is_bankrupt"]:
+        raise ValueError("This player is bankrupt and their game has ended.")
     if row["current_day"] > row["trading_days"]:
         raise ValueError("This player has completed all trading days.")
+    if row["status"] != "active":
+        raise ValueError("This game session is not active.")
     return row
+
+
+def _location_from_row(row: sqlite3.Row) -> dict:
+    """Return one location with its internal persona percentages grouped."""
+
+    location = dict(row)
+    location["persona_mix"] = (
+        location.pop("nomad_percentage"),
+        location.pop("healthy_percentage"),
+        location.pop("tourist_percentage"),
+        location.pop("local_percentage"),
+        location.pop("student_percentage"),
+    )
+    return location
+
+
+def list_locations(database_path: str | Path = V2_DATABASE_PATH) -> list[dict]:
+    """Load the fixed location catalogue, including internal persona data."""
+
+    initialize_v2_database(database_path)
+    with _connect(database_path) as connection:
+        rows = connection.execute(
+            """SELECT location_key, name, description, passers_by_per_day,
+                      rent_per_day_cents, nomad_percentage, healthy_percentage,
+                      tourist_percentage, local_percentage, student_percentage
+               FROM locations ORDER BY rowid"""
+        ).fetchall()
+    return [_location_from_row(row) for row in rows]
+
+
+def select_player_location(
+    database_path: str | Path,
+    session_id: str,
+    player_id: str,
+    location_key: object,
+) -> dict:
+    """Confirm a player's Day 0 location once; a saved choice cannot be replaced."""
+
+    if not isinstance(location_key, str) or not location_key:
+        raise ValueError("Choose a valid café location.")
+    initialize_v2_database(database_path)
+    with _connect(database_path) as connection:
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            player = _require_active_player(connection, session_id, player_id)
+            if player["current_day"] != 1:
+                raise ValueError("Location setup is only available before Day 1.")
+            existing = connection.execute(
+                "SELECT 1 FROM player_locations WHERE session_id = ? AND player_id = ?",
+                (session_id, player_id),
+            ).fetchone()
+            if existing:
+                raise ValueError("Your location is already confirmed and locked.")
+            location = connection.execute(
+                """SELECT location_key, name, description, passers_by_per_day,
+                          rent_per_day_cents, nomad_percentage, healthy_percentage,
+                          tourist_percentage, local_percentage, student_percentage
+                   FROM locations WHERE location_key = ?""",
+                (location_key,),
+            ).fetchone()
+            if location is None:
+                raise ValueError("Choose a valid café location.")
+            connection.execute(
+                """INSERT INTO player_locations
+                   (session_id, player_id, location_key, selected_at)
+                   VALUES (?, ?, ?, ?)""",
+                (session_id, player_id, location_key, _now_utc()),
+            )
+    return _location_from_row(location)
 
 
 def get_player_progress(
@@ -503,7 +803,7 @@ def get_player_progress(
     with _connect(database_path) as connection:
         player = connection.execute(
             """SELECT player_id, session_id, nickname, is_host,
-                      starting_cash_cents, cash_cents, current_day
+                      starting_cash_cents, cash_cents, current_day, is_bankrupt
                FROM players WHERE session_id = ? AND player_id = ?""",
             (session_id, player_id),
         ).fetchone()
@@ -511,14 +811,91 @@ def get_player_progress(
             raise ValueError("Player was not found in this game session.")
         products = connection.execute(
             """SELECT p.product_key, p.name, p.purchase_cost_cents,
-                      p.reference_price_cents, i.quantity, i.selected_price_cents
+                      p.reference_price_cents, p.category, p.is_drink,
+                      i.quantity, i.selected_price_cents,
+                      EXISTS (
+                          SELECT 1 FROM player_menu AS m
+                          WHERE m.session_id = i.session_id
+                            AND m.player_id = i.player_id
+                            AND m.product_key = i.product_key
+                      ) AS is_active
                FROM player_inventory AS i
                JOIN products AS p ON p.product_key = i.product_key
                WHERE i.session_id = ? AND i.player_id = ?
                ORDER BY p.product_key""",
             (session_id, player_id),
         ).fetchall()
-    return {**dict(player), "products": [dict(product) for product in products]}
+        location_row = connection.execute(
+            """SELECT l.location_key, l.name, l.description, l.passers_by_per_day,
+                      l.rent_per_day_cents, l.nomad_percentage, l.healthy_percentage,
+                      l.tourist_percentage, l.local_percentage, l.student_percentage
+               FROM player_locations AS pl
+               JOIN locations AS l ON l.location_key = pl.location_key
+               WHERE pl.session_id = ? AND pl.player_id = ?""",
+            (session_id, player_id),
+        ).fetchone()
+    location = _location_from_row(location_row) if location_row else None
+    product_data = [dict(product) for product in products]
+    for product in product_data:
+        product["is_drink"] = bool(product["is_drink"])
+        product["is_active"] = bool(product["is_active"])
+    progress = {
+        **dict(player),
+        "products": product_data,
+        "location": location,
+    }
+    progress["is_bankrupt"] = bool(progress["is_bankrupt"])
+    progress["final_game_result_cents"] = (
+        progress["cash_cents"] - progress["starting_cash_cents"]
+    )
+    return progress
+
+
+def set_player_menu(
+    database_path: str | Path,
+    session_id: str,
+    player_id: str,
+    product_keys: object,
+    *,
+    expected_day: object,
+) -> list[str]:
+    """Replace a player's active menu for the upcoming day, atomically."""
+
+    if not isinstance(product_keys, (list, tuple)):
+        raise ValueError("Menu selections must be a list of products.")
+    selected = list(product_keys)
+    if len(selected) > MAX_MENU_SIZE:
+        raise ValueError(f"A menu can contain at most {MAX_MENU_SIZE} products.")
+    if any(not isinstance(key, str) for key in selected):
+        raise ValueError("Menu selections must be valid product names.")
+    if len(set(selected)) != len(selected):
+        raise ValueError("A product cannot be selected more than once.")
+    catalog = {product.key: product for product in PRODUCT_CATALOGUE}
+    if any(key not in catalog for key in selected):
+        raise ValueError("The menu contains a product that is not in the catalogue.")
+    if not any(catalog[key].is_drink for key in selected):
+        raise ValueError("Your active menu must include at least one drink.")
+
+    requested_day = _positive_whole_number(expected_day, "Expected day")
+    initialize_v2_database(database_path)
+    with _connect(database_path) as connection:
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            player = _require_active_player(connection, session_id, player_id)
+            if player["current_day"] != requested_day:
+                raise ValueError(
+                    "The trading day changed before the menu was saved. Refresh and try again."
+                )
+            connection.execute(
+                "DELETE FROM player_menu WHERE session_id = ? AND player_id = ?",
+                (session_id, player_id),
+            )
+            connection.executemany(
+                """INSERT INTO player_menu (session_id, player_id, product_key)
+                   VALUES (?, ?, ?)""",
+                [(session_id, player_id, key) for key in selected],
+            )
+    return selected
 
 
 def resume_player(
@@ -590,11 +967,14 @@ def purchase_player_stock(
                 """SELECT p.purchase_cost_cents, i.quantity
                    FROM products AS p
                    JOIN player_inventory AS i ON i.product_key = p.product_key
+                   JOIN player_menu AS m
+                     ON m.session_id = i.session_id AND m.player_id = i.player_id
+                    AND m.product_key = i.product_key
                    WHERE p.product_key = ? AND i.session_id = ? AND i.player_id = ?""",
                 (product_key, session_id, player_id),
             ).fetchone()
             if product is None:
-                raise ValueError("That product is not in this player's inventory.")
+                raise ValueError("That product is not in this player's active menu.")
             result = calculate_purchase(
                 player["cash_cents"],
                 product["quantity"],
@@ -630,11 +1010,17 @@ def set_player_selling_price(
             _require_active_player(connection, session_id, player_id)
             result = connection.execute(
                 """UPDATE player_inventory SET selected_price_cents = ?
-                   WHERE session_id = ? AND player_id = ? AND product_key = ?""",
+                   WHERE session_id = ? AND player_id = ? AND product_key = ?
+                     AND EXISTS (
+                         SELECT 1 FROM player_menu AS m
+                         WHERE m.session_id = player_inventory.session_id
+                           AND m.player_id = player_inventory.player_id
+                           AND m.product_key = player_inventory.product_key
+                     )""",
                 (price_cents, session_id, player_id, product_key),
             )
             if result.rowcount != 1:
-                raise ValueError("That product is not in this player's inventory.")
+                raise ValueError("That product is not in this player's active menu.")
     return price_cents
 
 
@@ -661,11 +1047,28 @@ def trade_player_day(
                     "This day was already completed or is no longer current. "
                     "Refresh to see the latest progress."
                 )
+            location_row = connection.execute(
+                """SELECT l.location_key, l.passers_by_per_day,
+                          l.rent_per_day_cents,
+                          l.nomad_percentage, l.healthy_percentage,
+                          l.tourist_percentage, l.local_percentage, l.student_percentage
+                   FROM player_locations AS pl
+                   JOIN locations AS l ON l.location_key = pl.location_key
+                   WHERE pl.session_id = ? AND pl.player_id = ?""",
+                (session_id, player_id),
+            ).fetchone()
+            if location_row is None:
+                raise ValueError("Confirm a café location before trading.")
+            location = _location_from_row(location_row)
             product_rows = connection.execute(
                 """SELECT p.product_key, p.name, p.purchase_cost_cents,
                           p.reference_price_cents, i.quantity, i.selected_price_cents
+                          , p.is_drink
                    FROM player_inventory AS i
                    JOIN products AS p ON p.product_key = i.product_key
+                   JOIN player_menu AS m
+                     ON m.session_id = i.session_id AND m.player_id = i.player_id
+                    AND m.product_key = i.product_key
                    WHERE i.session_id = ? AND i.player_id = ?
                    ORDER BY p.product_key""",
                 (session_id, player_id),
@@ -678,18 +1081,23 @@ def trade_player_day(
                     "reference_price_cents": row["reference_price_cents"],
                     "quantity": row["quantity"],
                     "selected_price_cents": row["selected_price_cents"],
+                    "is_drink": bool(row["is_drink"]),
                 }
                 for row in product_rows
             ]
-            result = calculate_trade(player["cash_cents"], products)
+            result = calculate_v2_trade(player["cash_cents"], location, products)
             totals = result["totals"]
             day_number = player["current_day"]
             connection.execute(
                 """INSERT INTO player_trading_days
                     (session_id, player_id, day_number, cash_cents_after,
                      total_demand, total_units_sold, total_revenue_cents,
-                     total_cost_of_goods_sold_cents, total_gross_profit_cents)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     total_cost_of_goods_sold_cents, total_gross_profit_cents,
+                     potential_visitors, customers_served, lost_visitors,
+                     food_buyer_slots, food_opportunities_not_fulfilled,
+                     rent_due_cents, rent_paid_cents, rent_shortfall_cents, bankrupt,
+                     served_customers_by_persona_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     player_id,
@@ -700,6 +1108,18 @@ def trade_player_day(
                     totals["revenue_cents"],
                     totals["cost_of_goods_sold_cents"],
                     totals["gross_profit_cents"],
+                    result["potential_visitors"],
+                    result["customers_served"],
+                    result["lost_visitors"],
+                    result["food_buyer_slots"],
+                    result["food_opportunities_not_fulfilled"],
+                    result["rent_due_cents"],
+                    result["rent_paid_cents"],
+                    result["rent_shortfall_cents"],
+                    int(result["bankrupt"]),
+                    json.dumps(
+                        result["served_customers_by_persona"], sort_keys=True
+                    ),
                 ),
             )
             for product_result in result["products"]:
@@ -734,14 +1154,21 @@ def trade_player_day(
 
             new_day = day_number + 1
             connection.execute(
-                """UPDATE players SET cash_cents = ?, current_day = ?
+                """UPDATE players SET cash_cents = ?, current_day = ?, is_bankrupt = ?
                    WHERE session_id = ? AND player_id = ?""",
-                (result["cash_cents_after"], new_day, session_id, player_id),
+                (
+                    result["cash_cents_after"],
+                    new_day,
+                    int(result["bankrupt"]),
+                    session_id,
+                    player_id,
+                ),
             )
             remaining = connection.execute(
                 """SELECT COUNT(*) FROM players AS p
                    JOIN game_sessions AS s ON s.session_id = p.session_id
-                   WHERE p.session_id = ? AND p.current_day <= s.trading_days""",
+                   WHERE p.session_id = ? AND p.current_day <= s.trading_days
+                     AND p.is_bankrupt = 0""",
                 (session_id,),
             ).fetchone()[0]
             if remaining == 0:
@@ -758,6 +1185,18 @@ def trade_player_day(
         ],
         "totals": totals,
         "cash_cents_after": result["cash_cents_after"],
+        "rent_due_cents": result["rent_due_cents"],
+        "rent_paid_cents": result["rent_paid_cents"],
+        "rent_shortfall_cents": result["rent_shortfall_cents"],
+        "bankrupt": result["bankrupt"],
+        "potential_visitors": result["potential_visitors"],
+        "customers_served": result["customers_served"],
+        "lost_visitors": result["lost_visitors"],
+        "food_buyer_slots": result["food_buyer_slots"],
+        "food_opportunities_not_fulfilled": result[
+            "food_opportunities_not_fulfilled"
+        ],
+        "served_customers_by_persona": result["served_customers_by_persona"],
     }
 
 
@@ -779,7 +1218,11 @@ def load_player_trade_history(
         days = connection.execute(
             """SELECT day_number, cash_cents_after, total_demand,
                       total_units_sold, total_revenue_cents,
-                      total_cost_of_goods_sold_cents, total_gross_profit_cents
+                      total_cost_of_goods_sold_cents, total_gross_profit_cents,
+                      potential_visitors, customers_served, lost_visitors,
+                      food_buyer_slots, food_opportunities_not_fulfilled,
+                      rent_due_cents, rent_paid_cents, rent_shortfall_cents,
+                      bankrupt, served_customers_by_persona_json
                FROM player_trading_days
                WHERE session_id = ? AND player_id = ? ORDER BY day_number""",
             (session_id, player_id),
@@ -800,6 +1243,22 @@ def load_player_trade_history(
                 {
                     "day": day["day_number"],
                     "cash_cents_after": day["cash_cents_after"],
+                    "potential_visitors": day["potential_visitors"],
+                    "customers_served": day["customers_served"],
+                    "lost_visitors": day["lost_visitors"],
+                    "food_buyer_slots": day["food_buyer_slots"],
+                    "food_opportunities_not_fulfilled": day[
+                        "food_opportunities_not_fulfilled"
+                    ],
+                    "rent_due_cents": day["rent_due_cents"],
+                    "rent_paid_cents": day["rent_paid_cents"],
+                    "rent_shortfall_cents": day["rent_shortfall_cents"],
+                    "bankrupt": bool(day["bankrupt"]),
+                    "served_customers_by_persona": (
+                        json.loads(day["served_customers_by_persona_json"])
+                        if day["served_customers_by_persona_json"] is not None
+                        else None
+                    ),
                     "products": [dict(product) for product in products],
                     "totals": {
                         "demand": day["total_demand"],
@@ -813,3 +1272,45 @@ def load_player_trade_history(
                 }
             )
     return history
+
+
+def get_player_final_report(
+    database_path: str | Path, session_id: str, player_id: str
+) -> dict:
+    """Load a final report only after this player has finished their game."""
+
+    initialize_v2_database(database_path)
+    with _connect(database_path) as connection:
+        player = connection.execute(
+            """SELECT p.current_day, p.is_bankrupt, s.trading_days
+               FROM players AS p
+               JOIN game_sessions AS s ON s.session_id = p.session_id
+               WHERE p.session_id = ? AND p.player_id = ?""",
+            (session_id, player_id),
+        ).fetchone()
+    if player is None:
+        raise ValueError("Player was not found in this game session.")
+    if not player["is_bankrupt"] and player["current_day"] <= player["trading_days"]:
+        raise ValueError(
+            "This player has not finished; the final report is available after the game ends."
+        )
+
+    progress = get_player_progress(database_path, session_id, player_id)
+    history = load_player_trade_history(database_path, session_id, player_id)
+    leaderboard = get_session_leaderboard(database_path, session_id)
+    player_rank = next(
+        (
+            row["rank"]
+            for row in leaderboard["players"]
+            if row["nickname"] == progress["nickname"]
+        ),
+        None,
+    )
+    from performance_report import build_final_report
+
+    return build_final_report(
+        progress,
+        history,
+        ranking_position=player_rank,
+        ranking_is_final=leaderboard["is_final"],
+    )

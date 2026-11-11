@@ -3,7 +3,9 @@
 import streamlit as st
 
 import v2_storage
-from business_logic import calculate_demand, format_euros, price_to_cents
+from content import MAX_MENU_SIZE
+from business_logic import format_euros, price_to_cents
+from demand_engine import calculate_v2_demand
 
 
 def _save_player_identity(progress: dict, recovery_credential: str) -> None:
@@ -22,7 +24,294 @@ def _session_summary(session: dict) -> None:
     st.write(f"Status: **{session['status'].title()}**")
 
 
-def _show_player_cafe(session: dict, player: dict) -> None:
+def _show_management_dashboard(
+    progress: dict, history: list[dict], total_days: int
+) -> None:
+    """Render current player metrics and charts from saved results only."""
+
+    accumulated_revenue_cents = sum(
+        item["totals"]["revenue_cents"] for item in history
+    )
+    accumulated_customers = sum(item["customers_served"] for item in history)
+    accumulated_result_cents = (
+        progress["cash_cents"] - progress["starting_cash_cents"]
+    )
+    if progress["is_bankrupt"]:
+        day_value = f"Ended on Day {progress['current_day'] - 1}"
+    elif progress["current_day"] > total_days:
+        day_value = f"Complete ({total_days} days)"
+    else:
+        day_value = f"{progress['current_day']} of {total_days}"
+
+    st.subheader("Management Dashboard")
+    first_row = st.columns(2, gap="small")
+    first_row[0].metric("Available cash", format_euros(progress["cash_cents"]))
+    first_row[1].metric("Current day", day_value)
+    second_row = st.columns(2, gap="small")
+    second_row[0].metric(
+        "Accumulated revenue", format_euros(accumulated_revenue_cents)
+    )
+    second_row[1].metric(
+        "Accumulated game result", format_euros(accumulated_result_cents)
+    )
+    third_row = st.columns(2, gap="small")
+    third_row[0].metric("Customers served", f"{accumulated_customers:,}")
+    third_row[1].metric(
+        "Inventory units",
+        f"{sum(product['quantity'] for product in progress['products']):,}",
+    )
+    st.caption(
+        "Game result is current cash minus starting cash. Inventory has no recovery "
+        "value at the end of the game."
+    )
+
+    st.subheader("Current inventory")
+    st.dataframe(
+        [
+            {
+                "Product": product["name"],
+                "Units in stock": product["quantity"],
+                "Menu": "Active" if product["is_active"] else "Off menu",
+            }
+            for product in progress["products"]
+        ],
+        hide_index=True,
+        width="stretch",
+    )
+
+    st.subheader("Daily results history")
+    if not history:
+        st.info(
+            "No trading days have been completed yet. Complete your first day to "
+            "see revenue, cash, customer, and product-sales charts here."
+        )
+        return
+
+    day_numbers = [item["day"] for item in history]
+    st.subheader("Revenue by completed day")
+    st.line_chart(
+        {
+            "Day": day_numbers,
+            "Revenue (€)": [
+                item["totals"]["revenue_cents"] / 100 for item in history
+            ],
+        },
+        x="Day",
+        y="Revenue (€)",
+        height=240,
+        width="stretch",
+    )
+
+    st.subheader("Cash balance over time")
+    st.caption("Closing cash after each completed day, with starting cash at Day 0.")
+    cash_days = [0, *day_numbers]
+    cash_values = [progress["starting_cash_cents"] / 100] + [
+        item["cash_cents_after"] / 100 for item in history
+    ]
+    st.line_chart(
+        {"Day": cash_days, "Cash (€)": cash_values},
+        x="Day",
+        y="Cash (€)",
+        height=240,
+        width="stretch",
+    )
+
+    units_by_product = {item["product_key"]: 0 for item in progress["products"]}
+    names_by_product = {
+        item["product_key"]: item["name"] for item in progress["products"]
+    }
+    for day in history:
+        for product in day["products"]:
+            units_by_product[product["product_key"]] = (
+                units_by_product.get(product["product_key"], 0)
+                + product["units_sold"]
+            )
+            names_by_product[product["product_key"]] = product["name"]
+    ranked_products = sorted(
+        units_by_product.items(),
+        key=lambda item: (-item[1], names_by_product[item[0]].casefold()),
+    )
+    product_rows = [
+        {"Product": names_by_product[key], "Units sold": units}
+        for key, units in ranked_products
+    ]
+    st.subheader("Units sold by product")
+    st.bar_chart(
+        product_rows,
+        x="Product",
+        y="Units sold",
+        horizontal=True,
+        height=max(250, min(420, 28 * len(product_rows))),
+        width="stretch",
+    )
+    st.subheader("Best-selling products")
+    st.dataframe(
+        [
+            {"Rank": rank, **row}
+            for rank, row in enumerate(product_rows, start=1)
+        ],
+        hide_index=True,
+        width="stretch",
+    )
+
+    st.dataframe(
+        [
+            {
+                "Day": item["day"],
+                "Customers served": item["customers_served"],
+                "Units sold": item["totals"]["units_sold"],
+                "Revenue": format_euros(item["totals"]["revenue_cents"]),
+                "Rent paid": format_euros(item["rent_paid_cents"]),
+                "Cash after day": format_euros(item["cash_cents_after"]),
+            }
+            for item in history
+        ],
+        hide_index=True,
+        width="stretch",
+    )
+
+
+def _show_final_performance_report(report: dict) -> None:
+    """Display a finished player's saved-data report and evidence-based advice."""
+
+    st.subheader("Final Performance Report")
+    st.metric("Final game result", format_euros(report["final_game_result_cents"]))
+    if report["ranking_is_final"]:
+        st.metric("Final ranking", f"#{report['ranking_position']}")
+    else:
+        st.metric("Provisional ranking", f"#{report['ranking_position']}")
+        st.info("This ranking is provisional because other players are still playing.")
+
+    metrics = st.columns(2, gap="small")
+    metrics[0].metric("Total revenue", format_euros(report["total_revenue_cents"]))
+    metrics[1].metric("Total customers served", f"{report['total_customers_served']:,}")
+
+    st.caption("Best and worst products are ranked by total gross profit.")
+    best = report["best_product"]
+    worst = report["worst_product"]
+    if best is None:
+        st.write("**Best-performing product:** No product sales were recorded.")
+        st.write("**Worst-performing offered product:** No product sales were recorded.")
+    else:
+        st.write(
+            f"**Best-performing product:** {best['name']} "
+            f"(gross profit {format_euros(best['gross_profit_cents'])})"
+        )
+        st.write(
+            f"**Worst-performing offered product:** {worst['name']} "
+            f"(gross profit {format_euros(worst['gross_profit_cents'])})"
+        )
+
+    st.write(
+        f"**Remaining unsold inventory:** {report['remaining_inventory_units']:,} "
+        f"units · purchase-cost value {format_euros(report['remaining_inventory_value_cents'])}. "
+        "This value is informational and is not added to the final game result."
+    )
+    st.metric("Lost product-demand units due to stock limits", f"{report['lost_sales_units']:,}")
+    st.caption(
+        "Calculated from recorded product demand minus units sold; it excludes visitors "
+        "who had no suitable drink on the menu."
+    )
+
+    persona = report["most_served_persona"]
+    if persona:
+        st.write(
+            f"**Most successfully served persona:** {persona['name']} "
+            f"({persona['customers_served']:,} customers)"
+        )
+    else:
+        st.info("Most-served persona is unavailable because no customers were served or persona data is missing.")
+
+    st.markdown("**Recommendations based on your saved results**")
+    if report["recommendations"]:
+        for recommendation in report["recommendations"]:
+            st.write(f"- {recommendation['text']}")
+            st.caption(f"Evidence: {recommendation['evidence']}")
+    else:
+        st.write("No recommendation rules were triggered by the recorded results.")
+
+    if report["missing_data"]:
+        with st.expander("Data limitations"):
+            for note in report["missing_data"]:
+                st.write(f"- {note}")
+
+
+def _show_menu_setup(
+    database: str, session: dict, player: dict, progress: dict, can_trade: bool
+) -> None:
+    menu_products = [
+        product for product in progress["products"] if product["category"] != "Legacy"
+    ]
+    menu_by_key = {product["product_key"]: product for product in menu_products}
+    active_menu_keys = [
+        product["product_key"] for product in menu_products if product["is_active"]
+    ]
+    st.subheader("Build your menu")
+    selected_menu = st.multiselect(
+        "Choose up to 10 products",
+        options=list(menu_by_key),
+        default=active_menu_keys,
+        format_func=lambda key: (
+            f"{menu_by_key[key]['name']} · {menu_by_key[key]['category']} · "
+            f"reference {format_euros(menu_by_key[key]['reference_price_cents'])}"
+        ),
+        max_selections=MAX_MENU_SIZE,
+        key=f"v2_menu_select_{player['player_id']}_{progress['current_day']}",
+        disabled=not can_trade,
+    )
+    st.caption(
+        "A menu needs at least one drink. Changes apply to the upcoming day. "
+        "Removing a product keeps its unsold stock."
+    )
+    st.dataframe(
+        [
+            {
+                "Product": product["name"],
+                "Category": product["category"],
+                "Reference price": format_euros(product["reference_price_cents"]),
+                "Type": "Drink" if product.get("is_drink") else "Food",
+            }
+            for product in menu_products
+        ],
+        hide_index=True,
+        width="stretch",
+    )
+    if not can_trade:
+        st.info("Menu editing is disabled because your game has ended or is waiting to start.")
+    if st.button(
+        "Save menu",
+        key=f"v2_save_menu_{player['player_id']}_{progress['current_day']}",
+        disabled=not can_trade,
+        use_container_width=True,
+    ):
+        try:
+            v2_storage.set_player_menu(
+                database,
+                session["session_id"],
+                player["player_id"],
+                selected_menu,
+                expected_day=progress["current_day"],
+            )
+        except ValueError as error:
+            st.error(str(error))
+        else:
+            st.session_state["v2_player_action_message"] = "Your café menu was saved."
+            st.rerun()
+
+    if progress["location"]:
+        st.subheader("Signed location")
+        location = progress["location"]
+        st.markdown(f"### 📍 {location['name']}")
+        st.write(location["description"])
+        st.write(
+            f"Daily foot traffic: **{location['passers_by_per_day']:,}** · "
+            f"Daily rent: **{format_euros(location['rent_per_day_cents'])}**"
+        )
+
+
+def _show_player_cafe(
+    session: dict, player: dict, section: str = "Today"
+) -> None:
     database = v2_storage.V2_DATABASE_PATH
     progress = v2_storage.get_player_progress(
         database, session["session_id"], player["player_id"]
@@ -33,33 +322,106 @@ def _show_player_cafe(session: dict, player: dict) -> None:
     action_message = st.session_state.pop("v2_player_action_message", None)
     if action_message:
         st.success(action_message)
-    st.subheader(f"{progress['nickname']}'s café")
-    st.metric("Available cash", format_euros(progress["cash_cents"]))
     last_day = session["trading_days"]
-    if progress["current_day"] <= last_day:
-        st.metric("Trading day", f"{progress['current_day']} of {last_day}")
-    else:
-        st.metric("Trading day", f"Complete ({last_day} days)")
-        st.success("You completed all trading days for this game.")
-
-    if session["status"] != "active":
+    if session["status"] == "waiting":
         st.info("This game is not active yet. Wait for the host to start it.")
         return
 
-    can_trade = progress["current_day"] <= last_day
-    st.caption(
-        "Demand follows the V1 rule: at or below the reference price, 10 units; "
-        "above it and up to twice the reference price, 5 units; above twice the "
-        "reference price, 0 units."
+    if progress["location"] is None:
+        if section == "Café Setup":
+            _show_location_setup(database, session, player)
+        else:
+            st.info("Complete Café Setup first: choose a location and sign the lease.")
+        return
+
+    st.subheader(f"☕ {progress['nickname']}'s café")
+    if progress["is_bankrupt"]:
+        st.error("Your café could not pay its full rent. Your game has ended.")
+    elif progress["current_day"] > last_day:
+        st.success("You completed all trading days for this game.")
+
+    can_trade = (
+        session["status"] == "active"
+        and not progress["is_bankrupt"]
+        and progress["current_day"] <= last_day
     )
+    if section == "Today":
+        st.info(
+            "Plan today's menu in Café Setup, then set prices and buy stock here. "
+            "When you're ready, Complete Day will show a confirmation before trading."
+        )
+        today_metrics = st.columns(2, gap="small")
+        if progress["is_bankrupt"]:
+            day_label = f"Ended after Day {progress['current_day'] - 1}"
+        elif progress["current_day"] > last_day:
+            day_label = f"Finished · {last_day} days"
+        else:
+            day_label = f"Day {progress['current_day']} of {last_day}"
+        today_metrics[0].metric("Available cash", format_euros(progress["cash_cents"]))
+        today_metrics[1].metric("Trading progress", day_label)
+        st.progress(
+            min(progress["current_day"] - 1, last_day) / last_day,
+            text=f"{min(progress['current_day'] - 1, last_day)} of {last_day} days completed",
+        )
+    if section == "Dashboard":
+        _show_management_dashboard(progress, history, last_day)
+        return
+    if section == "Café Setup":
+        _show_menu_setup(database, session, player, progress, can_trade)
+        return
+    if section == "Final Report":
+        if can_trade:
+            st.info("Your Final Report will be available after you finish all trading days.")
+            st.caption(f"Progress: {min(progress['current_day'] - 1, last_day)} of {last_day} days.")
+        else:
+            _show_final_performance_report(
+                v2_storage.get_player_final_report(
+                    database, session["session_id"], player["player_id"]
+                )
+            )
+        return
+    if not can_trade:
+        report = v2_storage.get_player_final_report(
+            database, session["session_id"], player["player_id"]
+        )
+        st.success("Your game is complete. Open Final Report to review your results.")
+        return
+    menu_products = [product for product in progress["products"] if product["category"] != "Legacy"]
+    menu_by_key = {product["product_key"]: product for product in menu_products}
+    active_menu_keys = [
+        product["product_key"] for product in menu_products if product["is_active"]
+    ]
+    st.info(
+        "Demand is deterministic: 10% of passers-by become potential visitors. "
+        "Each visitor can request one suitable drink. Persona preferences and "
+        "price limits split demand across your menu; a price above twice the "
+        "reference price gets no demand. Up to 60% of drink customers receive "
+        "one food opportunity. Sales cannot exceed stock, and customers do not "
+        "substitute when an item is unavailable."
+    )
+    with st.expander("How persona prices affect demand"):
+        st.write(
+            "Maximum prices by persona: Student 1.00× reference; Local & "
+            "traditional 1.25×; Digital nomad 1.50×; Healthy & plant-based "
+            "1.75×; Tourist 2.00×. The limits include the exact boundary. "
+            "At or below reference price, a product gets twice the allocation "
+            "weight it gets above reference but within the persona's limit. "
+            "Affinity scores 0, 1, and 3 mean no interest, likes, and strong "
+            "preference. When whole visitors must be split, largest remainders "
+            "are assigned using the documented fixed persona and product order."
+        )
     for product in progress["products"]:
+        if not product["is_active"]:
+            continue
         key = product["product_key"]
         with st.container(border=True):
-            st.markdown(f"**{product['name']}**")
+            icon = "🥤" if product.get("is_drink") else "🥐"
+            st.markdown(f"### {icon} {product['name']}")
             st.write(
+                f"Category: **{product['category']}** · Reference price: "
+                f"{format_euros(product['reference_price_cents'])} · "
                 f"In stock: **{product['quantity']}** · Purchase cost: "
-                f"{format_euros(product['purchase_cost_cents'])} · Reference price: "
-                f"{format_euros(product['reference_price_cents'])}"
+                f"{format_euros(product['purchase_cost_cents'])}"
             )
             price_field = st.text_input(
                 f"Selling price for {product['name']} (€)",
@@ -75,10 +437,26 @@ def _show_player_cafe(session: dict, player: dict) -> None:
             except ValueError as error:
                 st.error(str(error))
             else:
-                demand = calculate_demand(
-                    preview_price, product["reference_price_cents"]
+                preview_products = [
+                    {
+                        **item,
+                        "selected_price_cents": (
+                            preview_price
+                            if item["product_key"] == key
+                            else item["selected_price_cents"]
+                        ),
+                    }
+                    for item in menu_products
+                    if item["is_active"]
+                ]
+                preview = calculate_v2_demand(
+                    progress["location"], preview_products
                 )
-                st.write(f"Expected daily demand at this price: **{demand} units**")
+                demand = preview["products"][key]["demand"]
+                st.write(
+                    f"Estimated menu demand at this price: **{demand} units/day** "
+                    "before applying stock limits."
+                )
             if st.button(
                 f"Save price for {product['name']}",
                 key=f"v2_save_price_{player['player_id']}_{key}",
@@ -99,7 +477,6 @@ def _show_player_cafe(session: dict, player: dict) -> None:
                         f"{product['name']} selling price saved as {format_euros(saved)}."
                     )
                     st.rerun()
-
             quantity = st.number_input(
                 f"Units to buy ({product['name']})",
                 min_value=1,
@@ -130,43 +507,172 @@ def _show_player_cafe(session: dict, player: dict) -> None:
                     )
                     st.rerun()
 
+    off_menu_stock = [
+        product
+        for product in progress["products"]
+        if not product["is_active"] and product["quantity"] > 0
+    ]
+    if off_menu_stock:
+        st.subheader("Stock from removed menu items")
+        st.caption("This stock is preserved and is excluded from purchases and trading while off-menu.")
+        st.dataframe(
+            [
+                {
+                    "Product": product["name"],
+                    "Units kept in stock": product["quantity"],
+                    "Category": product["category"],
+                }
+                for product in off_menu_stock
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
+
+    confirm_key = f"v2_confirm_day_{player['player_id']}_{progress['current_day']}"
     if can_trade and st.button(
         f"Complete Day {progress['current_day']}",
         type="primary",
         key=f"v2_complete_day_{player['player_id']}_{progress['current_day']}",
+        use_container_width=True,
     ):
-        try:
-            result = v2_storage.trade_player_day(
-                database,
-                session["session_id"],
-                player["player_id"],
-                expected_day=progress["current_day"],
-            )
-        except ValueError as error:
-            st.error(str(error))
-        else:
-            st.session_state["v2_last_trade_message"] = (
-                f"Day {result['day']} completed. Revenue: "
-                f"{format_euros(result['totals']['revenue_cents'])}."
-            )
+        st.session_state[confirm_key] = True
+        st.rerun()
+
+    if can_trade and st.session_state.get(confirm_key):
+        st.warning(
+            f"Complete Day {progress['current_day']} now? This records sales, "
+            "charges rent, and advances your game by one day."
+        )
+        confirm_col, cancel_col = st.columns(2, gap="small")
+        if confirm_col.button(
+            "Confirm Complete Day",
+            type="primary",
+            key=f"v2_confirm_complete_{player['player_id']}_{progress['current_day']}",
+            use_container_width=True,
+        ):
+            st.session_state.pop(confirm_key, None)
+            try:
+                result = v2_storage.trade_player_day(
+                    database,
+                    session["session_id"],
+                    player["player_id"],
+                    expected_day=progress["current_day"],
+                )
+            except ValueError as error:
+                st.error(str(error))
+            else:
+                st.session_state["v2_last_trade_message"] = (
+                    f"Day {result['day']} completed. Revenue: "
+                    f"{format_euros(result['totals']['revenue_cents'])}. "
+                    f"Rent paid: {format_euros(result['rent_paid_cents'])} of "
+                    f"{format_euros(result['rent_due_cents'])}. "
+                    f"Customers served: {result['customers_served']}; "
+                    f"visitors lost: {result['lost_visitors']}."
+                    + (" Your café is bankrupt and your game has ended."
+                       if result["bankrupt"] else "")
+                )
+                st.rerun()
+        if cancel_col.button(
+            "Cancel",
+            key=f"v2_cancel_complete_{player['player_id']}_{progress['current_day']}",
+            use_container_width=True,
+        ):
+            st.session_state.pop(confirm_key, None)
             st.rerun()
 
     trade_message = st.session_state.pop("v2_last_trade_message", None)
     if trade_message:
         st.success(trade_message)
     if history:
-        st.subheader("Trading history")
-        rows = [
-            {
-                "Day": item["day"],
-                "Units sold": item["totals"]["units_sold"],
-                "Revenue": format_euros(item["totals"]["revenue_cents"]),
-                "Gross profit": format_euros(item["totals"]["gross_profit_cents"]),
-                "Cash after trading": format_euros(item["cash_cents_after"]),
-            }
-            for item in history
-        ]
-        st.dataframe(rows, hide_index=True, use_container_width=True)
+        latest = history[-1]
+        st.subheader(f"Day {latest['day']} results")
+        st.dataframe(
+            [
+                {
+                    "Product": item["name"],
+                    "Demand": item["demand"],
+                    "Units sold": item["units_sold"],
+                    "Revenue": format_euros(item["revenue_cents"]),
+                    "Cost of goods sold": format_euros(
+                        item["cost_of_goods_sold_cents"]
+                    ),
+                    "Gross profit": format_euros(item["gross_profit_cents"]),
+                }
+                for item in latest["products"]
+            ]
+            + [
+                {
+                    "Product": "TOTAL",
+                    "Demand": latest["totals"]["demand"],
+                    "Units sold": latest["totals"]["units_sold"],
+                    "Revenue": format_euros(latest["totals"]["revenue_cents"]),
+                    "Cost of goods sold": format_euros(
+                        latest["totals"]["cost_of_goods_sold_cents"]
+                    ),
+                    "Gross profit": format_euros(
+                        latest["totals"]["gross_profit_cents"]
+                    ),
+                }
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
+        st.caption(
+            f"Rent: {format_euros(latest['rent_paid_cents'])} paid of "
+            f"{format_euros(latest['rent_due_cents'])} due; "
+            f"{format_euros(latest['rent_shortfall_cents'])} forgiven."
+        )
+
+
+def _show_location_setup(database: str, session: dict, player: dict) -> None:
+    """Render Day 0 cards; the pending choice stays in this browser until signed."""
+
+    st.header("📍 Day 0 — Choose your café location")
+    st.write("Review the locations, choose one, then confirm your lease.")
+    locations = v2_storage.list_locations(database)
+    pending_key = f"v2_pending_location_{player['player_id']}"
+    pending_location = st.session_state.get(pending_key)
+
+    for location in locations:
+        with st.container(border=True):
+            st.subheader(f"☕ {location['name']}")
+            st.write(location["description"])
+            st.write(f"Daily foot traffic: **{location['passers_by_per_day']:,} people**")
+            st.write(f"Daily rent: **{format_euros(location['rent_per_day_cents'])}**")
+            if st.button(
+                "Choose this location",
+                key=f"v2_choose_location_{player['player_id']}_{location['location_key']}",
+            ):
+                st.session_state[pending_key] = location["location_key"]
+                st.rerun()
+
+    selected = next(
+        (location for location in locations if location["location_key"] == pending_location),
+        None,
+    )
+    if selected:
+        st.info(f"Selected: **{selected['name']}**. You can still choose another card before signing.")
+    if st.button(
+        "Sign the lease",
+        type="primary",
+        key=f"v2_sign_lease_{player['player_id']}",
+        disabled=selected is None,
+    ):
+        try:
+            confirmed = v2_storage.select_player_location(
+                database,
+                session["session_id"],
+                player["player_id"],
+                selected["location_key"],
+            )
+        except ValueError as error:
+            st.error(str(error))
+        else:
+            st.session_state.pop(pending_key, None)
+            st.session_state["v2_player_action_message"] = (
+                f"Lease signed for {confirmed['name']}. Your location is locked."
+            )
+            st.rerun()
 
 
 def _show_waiting_room(
@@ -207,13 +713,15 @@ def _show_waiting_room(
     elif session["status"] == "active":
         st.success("The game has started.")
         if player_id:
-            _show_player_cafe(
-                session, {"session_id": session_id, "player_id": player_id}
-            )
+            st.info("Choose Today, Café Setup, Dashboard, or Final Report from navigation.")
         else:
             st.info("Join as a player to manage a café in this game.")
     else:
         st.info("This game is finished.")
+        if player_id:
+            _show_player_cafe(
+                session, {"session_id": session_id, "player_id": player_id}
+            )
 
     if session["status"] == "waiting" and st.button(
         "Refresh waiting room", key=f"refresh_{session_id}"
@@ -351,19 +859,144 @@ def _resume_page() -> None:
             st.rerun()
 
 
-def render() -> None:
-    """Render V2 lobby navigation and the selected screen."""
-
-    v2_storage.initialize_v2_database(v2_storage.V2_DATABASE_PATH)
-    st.title("Campus Tycoon 2.0")
-    st.caption("Create a multiplayer game, join with a code, or securely resume.")
-    page = st.selectbox(
-        "Multiplayer pages",
+def _host_join_page() -> None:
+    flow = st.radio(
+        "Choose an action",
         ["Host Game", "Join Game", "Resume Game"],
+        horizontal=True,
+        key="v2_access_flow",
     )
-    if page == "Host Game":
+    if flow == "Host Game":
         _host_page()
-    elif page == "Join Game":
+    elif flow == "Join Game":
         _join_page()
     else:
         _resume_page()
+
+
+def _leaderboard_page() -> None:
+    st.header("Multiplayer Leaderboard")
+    player = st.session_state.get("v2_player") or {}
+    host_session_id = st.session_state.get("v2_host_session_id")
+    session_id = player.get("session_id") or host_session_id
+    if not session_id:
+        st.info("Join or resume a game, or host a game, to view its leaderboard.")
+        return
+
+    if st.button("Refresh leaderboard", key="v2_leaderboard_refresh"):
+        st.rerun()
+
+    try:
+        session = v2_storage.get_game_session(
+            v2_storage.V2_DATABASE_PATH, session_id
+        )
+        standings = v2_storage.get_session_leaderboard(
+            v2_storage.V2_DATABASE_PATH, session_id
+        )
+    except ValueError as error:
+        st.error(str(error))
+        return
+
+    if standings["is_final"]:
+        st.success("Final leaderboard — every player has finished.")
+    else:
+        st.info("Provisional leaderboard — at least one player is still playing.")
+    if session["status"] == "waiting":
+        st.caption("The host has not started this game yet.")
+    if not standings["players"]:
+        st.info("No players have joined this game yet.")
+        return
+
+    st.dataframe(
+        [
+            {
+                "Rank": item["rank"],
+                "Player": item["nickname"],
+                "Café location": item["location"],
+                "Completed days": f"{item['completed_days']} / {session['trading_days']}",
+                "Game result": format_euros(item["game_result_cents"]),
+                "Status": item["status"],
+            }
+            for item in standings["players"]
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )
+
+
+def render() -> None:
+    """Render the six main areas of the multiplayer game."""
+
+    v2_storage.initialize_v2_database(v2_storage.V2_DATABASE_PATH)
+    st.markdown(
+        """
+        <style>
+        :root { color-scheme: light; }
+        [data-testid="stAppViewContainer"] { background: #fbf5ea; }
+        [data-testid="stHeader"] { background: rgba(251, 245, 234, .92); }
+        [data-testid="stSidebar"] { background: #efe1cc; }
+        [data-testid="stMetric"] {
+          background: #fffaf1; border: 1px solid #e4d2b8;
+          border-radius: 14px; padding: .8rem;
+        }
+        .stButton > button, [data-testid="stFormSubmitButton"] button {
+          background: #a64f35; color: #fffaf1; border: 0;
+          border-radius: 10px; min-height: 2.7rem; font-weight: 650;
+        }
+        .stButton > button:hover, [data-testid="stFormSubmitButton"] button:hover {
+          background: #853b28; color: #fff;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"] {
+          background: #fffaf1; border-radius: 14px;
+        }
+        @media (max-width: 640px) {
+          .block-container { padding: 1rem .8rem 2rem; }
+          [data-testid="stMetricValue"] { font-size: 1.35rem; }
+          .stButton > button { min-height: 3rem; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.title("☕ Campus Tycoon 2.0")
+    st.caption("A Lisbon café game. Plan your menu, serve your customers, grow your result.")
+    page = st.selectbox(
+        "Game section",
+        [
+            "Host / Join Game",
+            "Café Setup",
+            "Today",
+            "Dashboard",
+            "Leaderboard",
+            "Final Report",
+        ],
+        key="v2_main_navigation",
+    )
+    if page == "Host / Join Game":
+        _host_join_page()
+        return
+    if page == "Leaderboard":
+        _leaderboard_page()
+        return
+
+    player = st.session_state.get("v2_player")
+    if not player:
+        st.info("Join or resume a game before opening your café pages.")
+        st.caption("Use **Host / Join Game** to get started.")
+        return
+    try:
+        session = v2_storage.get_game_session(
+            v2_storage.V2_DATABASE_PATH, player["session_id"]
+        )
+    except ValueError as error:
+        st.error(str(error))
+        return
+
+    if page in {"Café Setup", "Today", "Dashboard", "Final Report"}:
+        if session["status"] == "waiting":
+            st.info("Your game is waiting for the host to start it.")
+            st.caption("Your saved identity and setup will remain available after the game starts.")
+            if st.button("Refresh game status", key="v2_refresh_game_status", use_container_width=True):
+                st.rerun()
+            return
+        _show_player_cafe(session, player, section=page)

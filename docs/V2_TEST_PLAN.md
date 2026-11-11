@@ -47,6 +47,67 @@
 - The final configured day stopping further activity for that player and finishing the session once all players finish.
 - A resumed player seeing and continuing only their own café.
 
+## Step 2.1 and 2.2 test coverage
+
+`tests/test_v2_storage.py`, `tests/test_v2_interface.py`, and `tests/test_v2_content.py` cover:
+
+- The four configured Step 2.1 locations, their persona percentages summing to 100, per-player selection/persistence, lease locking, and trading blocked before lease confirmation.
+- The 12 approved Step 2.2 catalogue records and all five personas.
+- A complete affinity entry for every product/persona pair using only scores 0, 1, or 3.
+- Per-player menus surviving resume, independent menus, the 10-product limit, duplicate rejection, and the requirement for at least one drink.
+- Purchases and prices restricted to active menu products; invalid prices leave saved state unchanged.
+- Removed menu products retaining unsold stock, and later menu changes leaving completed trading history unchanged.
+- AppTest showing category and reference price details and actions only for current menu products.
+
+## Step 2.5 daily gameplay test coverage
+
+`tests/test_v2_daily_gameplay.py`, `tests/test_v2_storage.py`, and
+`tests/test_v2_interface.py` cover:
+
+- A complete configured game with one saved result per day and no trade after completion.
+- Rent paid exactly once after sales, with purchase costs excluded from the sale cash update.
+- Rent shortfall setting cash to zero, recording paid and forgiven rent, and ending only the affected player.
+- Per-player rent, bankruptcy, balances, inventory, and day progression remaining independent.
+- Final result equaling final cash minus starting cash, with no inventory recovery value.
+- The interface showing product-level results, totals, and rent after a completed day.
+
+## Step 3.1 leaderboard test coverage
+
+`tests/test_v2_leaderboard.py` covers result ranking, revenue and stable-ID
+tie-breaks, finished and playing progress, session isolation, negative results,
+one-player and empty sessions, unknown sessions, and read-only refresh behavior.
+An AppTest checks that the page shows a negative euro result and that its manual
+refresh leaves player progress unchanged.
+
+## Step 3.2 management dashboard test coverage
+
+`tests/test_v2_interface.py` covers dashboard metrics against the player's
+saved progress and history, product sales totals, chronological daily history,
+player isolation, empty histories, and reruns that leave player progress and
+history unchanged. The app uses Streamlit's built-in line and bar charts; AppTest
+checks the chart sections and the data tables that accompany them.
+
+## Step 3.3 final performance report test coverage
+
+`tests/test_v2_performance_report.py` covers final result, ranking/provisional
+status, best and worst products, unsold inventory valuation, stock-limited lost
+sales, saved persona totals, evidence-based recommendation triggers, empty
+sales, missing legacy persona records, per-player access/isolation, and repeat
+report reads that do not change game state. `tests/test_v2_interface.py` checks
+that a finished player's report appears and an unfinished player's report does
+not.
+
+## Step 3.4 UI and mobile experience test coverage
+
+`tests/test_v2_interface.py` exercises the Host / Join Game entry flow,
+location and menu setup, price saving, purchases, daily trading, dashboard, and
+final report. The leaderboard UI and refresh are covered in
+`tests/test_v2_leaderboard.py`. The day-completion test checks that the first
+button press does not trade, confirmation trades once, and cancellation leaves
+the day and history unchanged. AppTest verifies navigation and persistence
+behavior; it does not emulate a physical phone, so narrow-screen layout still
+needs the manual mobile checklist.
+
 ## V1 tests affected by future V2 rules
 
 Do not delete or weaken these tests. Their current expectations continue to test the preserved V1 app. If V2 later changes behavior, add V2 tests alongside them and explain the changed requirement.
@@ -64,7 +125,7 @@ Purchase validation, cents arithmetic, atomic writes, and no replay remain valua
 ## Later stage test outline
 
 1. **Host/join UI and independent V1-rule gameplay (implemented):** host/join/resume, player-scoped purchases and prices, day completion, and duplicate-submission protection.
-2. **Locations and catalogue:** all eight agreed records, selection rules, product menu size up to 10, rejection of item 11 without writes.
+2. **Locations and catalogue:** four supplied location records and Step 2.2 product/menu acceptance are implemented; remaining location records, if still required, and final catalogue expansion are tracked separately.
 3. **Demand:** each persona/location/product/price factor separately, hand-calculated combinations, boundaries, repeatability, and stock limits.
 4. **Shared progression:** host advances once; all player results persist atomically; failed resolution rolls back; inactive-player policy is enforced.
 5. **Leaderboard/report:** profit matches approved formula, includes all agreed costs, handles negative/tied outcomes, and is session-scoped.
