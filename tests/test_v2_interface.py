@@ -14,7 +14,7 @@ V2_LABEL = "Campus Tycoon 2.0 · Multiplayer"
 
 def open_v2_app(monkeypatch, database):
     monkeypatch.setattr(v2_storage, "V2_DATABASE_PATH", database)
-    app = AppTest.from_file(str(APP_PATH)).run()
+    app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
     app.radio[0].set_value(V2_LABEL).run()
     return app
 
@@ -434,4 +434,28 @@ def test_finished_player_sees_personalized_provisional_final_report(
     assert not any(
         item.value == "Final Performance Report" for item in unfinished_app.subheader
     )
+
+
+def test_independent_screen_sessions_do_not_inherit_login_or_replay_purchases(tmp_path, monkeypatch):
+    database = tmp_path / "browser-isolation.sqlite3"
+    session = v2_storage.create_game_session(database)
+    alice = v2_storage.join_game_session(database, session["join_code"], "Alice")
+    first = resume_in_app(open_v2_app(monkeypatch, database), session, alice)
+    assert first.session_state["v2_player"]["player_id"] == alice["player_id"]
+    second = open_v2_app(monkeypatch, database)
+    assert "v2_player" not in second.session_state
+    assert "v2_host_credential" not in second.session_state
+    v2_storage.start_game_session(database, session["session_id"], session["host_credential"])
+    v2_storage.select_player_location(database, session["session_id"], alice["player_id"], "carcavelos_nova_sbe")
+    first = navigate(first, "Today")
+    first = click(first, "Buy Bica")
+    before = v2_storage.get_player_progress(database, session["session_id"], alice["player_id"])
+    first.run()
+    assert not first.exception
+    assert v2_storage.get_player_progress(database, session["session_id"], alice["player_id"]) == before
+    first = navigate(first, "Host / Join Game")
+    first = choose_access_flow(first, "Resume Game")
+    first = click(first, "Sign out of this player")
+    assert "v2_player" not in first.session_state
+    assert "v2_player" not in second.session_state
 

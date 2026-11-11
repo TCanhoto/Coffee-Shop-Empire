@@ -129,6 +129,7 @@ def build_final_report(
                 "text": (
                     "Consider buying less next time: remaining stock costs "
                     f"€{remaining_inventory_value_cents // 100:,}."
+                    f"{remaining_inventory_value_cents % 100:02d}."
                 ),
                 "evidence": "Unsold stock purchase cost is at least 10% of starting cash.",
             }

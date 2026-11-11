@@ -1003,6 +1003,9 @@ def set_player_selling_price(
     """Set one player's price for one product, in integer euro cents."""
 
     price_cents = price_to_cents(price)
+    # SQLite INTEGER is signed 64-bit. Reject unsupported input before writes.
+    if price_cents > 2**63 - 1:
+        raise ValueError("Selling price is too large to save.")
     initialize_v2_database(database_path)
     with _connect(database_path) as connection:
         with connection:

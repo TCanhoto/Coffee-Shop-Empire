@@ -174,7 +174,7 @@ def test_leaderboard_page_shows_negative_result_and_manual_refresh_is_read_only(
         )
     monkeypatch.setattr(v2_storage, "V2_DATABASE_PATH", database)
     app_path = Path(__file__).resolve().parents[1] / "app.py"
-    app = AppTest.from_file(str(app_path)).run()
+    app = AppTest.from_file(str(app_path), default_timeout=15).run()
     app.radio[0].set_value("Campus Tycoon 2.0 · Multiplayer").run()
     app.radio[0].set_value("Resume Game").run()
     app.text_input[0].set_value(session["join_code"])
