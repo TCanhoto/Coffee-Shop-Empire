@@ -303,6 +303,24 @@ def test_confirmed_location_cannot_be_changed_or_overwritten(tmp_path):
             )
 
 
+def test_invalid_location_confirmation_is_rejected_without_saving(tmp_path):
+    database = tmp_path / "invalid-location.sqlite3"
+    session = make_session(database)
+    player = join(database, session, "Alex")
+    start_game_session(database, session["session_id"], session["host_credential"])
+    before = get_player_progress(database, session["session_id"], player["player_id"])
+
+    with pytest.raises(ValueError, match="valid café location"):
+        confirm_location(database, session, player, "not-a-real-location")
+
+    assert get_player_progress(database, session["session_id"], player["player_id"]) == before
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM player_locations WHERE session_id = ? AND player_id = ?",
+            (session["session_id"], player["player_id"]),
+        ).fetchone()[0] == 0
+
+
 def test_trade_is_rejected_before_location_confirmation_without_changes(tmp_path):
     database = tmp_path / "game-v2.sqlite3"
     session = make_session(database)

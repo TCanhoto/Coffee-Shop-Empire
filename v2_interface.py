@@ -6,6 +6,7 @@ import v2_storage
 from content import MAX_MENU_SIZE
 from business_logic import format_euros, price_to_cents
 from demand_engine import calculate_v2_demand
+from v2_ui_components import render_sticky_business_header
 
 
 def _save_player_identity(progress: dict, recovery_credential: str) -> None:
@@ -269,7 +270,6 @@ def _show_menu_setup(
                 "Product": product["name"],
                 "Category": product["category"],
                 "Reference price": format_euros(product["reference_price_cents"]),
-                "Type": "Drink" if product.get("is_drink") else "Food",
             }
             for product in menu_products
         ],
@@ -323,6 +323,7 @@ def _show_player_cafe(
     if action_message:
         st.success(action_message)
     last_day = session["trading_days"]
+    render_sticky_business_header(progress, last_day)
     if session["status"] == "waiting":
         st.info("This game is not active yet. Wait for the host to start it.")
         return
@@ -350,15 +351,6 @@ def _show_player_cafe(
             "Plan today's menu in Café Setup, then set prices and buy stock here. "
             "When you're ready, Complete Day will show a confirmation before trading."
         )
-        today_metrics = st.columns(2, gap="small")
-        if progress["is_bankrupt"]:
-            day_label = f"Ended after Day {progress['current_day'] - 1}"
-        elif progress["current_day"] > last_day:
-            day_label = f"Finished · {last_day} days"
-        else:
-            day_label = f"Day {progress['current_day']} of {last_day}"
-        today_metrics[0].metric("Available cash", format_euros(progress["cash_cents"]))
-        today_metrics[1].metric("Trading progress", day_label)
         st.progress(
             min(progress["current_day"] - 1, last_day) / last_day,
             text=f"{min(progress['current_day'] - 1, last_day)} of {last_day} days completed",
@@ -624,8 +616,49 @@ def _show_player_cafe(
         )
 
 
+@st.dialog("Confirm your café lease", width="small", dismissible=False)
+def _confirm_location_lease(
+    database: str, session: dict, player: dict, location: dict
+) -> None:
+    """Confirm and persist one player's selected lease from a modal dialog."""
+
+    st.write(f"Sign a lease for **{location['name']}**?")
+    st.write(f"Daily rent: **{format_euros(location['rent_per_day_cents'])}**")
+    st.warning("Once signed, this lease cannot be changed for the rest of the game.")
+
+    if st.button(
+        "Sign the lease",
+        type="primary",
+        key=f"v2_dialog_sign_lease_{player['player_id']}",
+        use_container_width=True,
+    ):
+        try:
+            confirmed = v2_storage.select_player_location(
+                database,
+                session["session_id"],
+                player["player_id"],
+                location["location_key"],
+            )
+        except ValueError as error:
+            st.error(str(error))
+        else:
+            st.session_state.pop(f"v2_pending_location_{player['player_id']}", None)
+            st.session_state["v2_player_action_message"] = (
+                f"Lease signed for {confirmed['name']}. Your location is locked."
+            )
+            st.rerun()
+
+    if st.button(
+        "Cancel",
+        key=f"v2_dialog_cancel_lease_{player['player_id']}",
+        use_container_width=True,
+    ):
+        st.session_state.pop(f"v2_pending_location_{player['player_id']}", None)
+        st.rerun()
+
+
 def _show_location_setup(database: str, session: dict, player: dict) -> None:
-    """Render Day 0 cards; the pending choice stays in this browser until signed."""
+    """Render Day 0 cards; only signing writes the selected location to SQLite."""
 
     st.header("📍 Day 0 — Choose your café location")
     st.write("Review the locations, choose one, then confirm your lease.")
@@ -651,28 +684,7 @@ def _show_location_setup(database: str, session: dict, player: dict) -> None:
         None,
     )
     if selected:
-        st.info(f"Selected: **{selected['name']}**. You can still choose another card before signing.")
-    if st.button(
-        "Sign the lease",
-        type="primary",
-        key=f"v2_sign_lease_{player['player_id']}",
-        disabled=selected is None,
-    ):
-        try:
-            confirmed = v2_storage.select_player_location(
-                database,
-                session["session_id"],
-                player["player_id"],
-                selected["location_key"],
-            )
-        except ValueError as error:
-            st.error(str(error))
-        else:
-            st.session_state.pop(pending_key, None)
-            st.session_state["v2_player_action_message"] = (
-                f"Lease signed for {confirmed['name']}. Your location is locked."
-            )
-            st.rerun()
+        _confirm_location_lease(database, session, player, selected)
 
 
 def _show_waiting_room(
@@ -994,9 +1006,6 @@ def render() -> None:
 
     if page in {"Café Setup", "Today", "Dashboard", "Final Report"}:
         if session["status"] == "waiting":
-            st.info("Your game is waiting for the host to start it.")
-            st.caption("Your saved identity and setup will remain available after the game starts.")
             if st.button("Refresh game status", key="v2_refresh_game_status", use_container_width=True):
                 st.rerun()
-            return
         _show_player_cafe(session, player, section=page)

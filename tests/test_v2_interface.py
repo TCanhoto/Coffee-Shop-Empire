@@ -5,6 +5,7 @@ import sqlite3
 
 from streamlit.testing.v1 import AppTest
 
+from business_logic import format_euros
 import v2_storage
 
 
@@ -186,6 +187,63 @@ def test_canceling_day_confirmation_does_not_trade_or_advance(tmp_path, monkeypa
     assert any(button.label == "Complete Day 1" for button in app.button)
 
 
+def test_sticky_business_header_tracks_authenticated_players_saved_finances(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "sticky-header.sqlite3"
+    session = v2_storage.create_game_session(database, trading_days=3)
+    alex = v2_storage.join_game_session(database, session["join_code"], "Alex")
+    blair = v2_storage.join_game_session(database, session["join_code"], "Blair")
+    v2_storage.start_game_session(database, session["session_id"], session["host_credential"])
+    for player in (alex, blair):
+        v2_storage.select_player_location(
+            database, session["session_id"], player["player_id"], "carcavelos_nova_sbe"
+        )
+    v2_storage.purchase_player_stock(
+        database, session["session_id"], alex["player_id"], "bica", 1
+    )
+    v2_storage.purchase_player_stock(
+        database, session["session_id"], blair["player_id"], "bica", 500
+    )
+
+    app = open_v2_app(monkeypatch, database)
+    app = resume_in_app(app, session, alex)
+    app = navigate(app, "Today")
+
+    def header_metrics(current_app):
+        return {metric.label: metric.value for metric in current_app.metric}
+
+    metrics = header_metrics(app)
+    assert metrics == {
+        "Day / days": "1 / 3",
+        "Available cash": "€1,999.80",
+        "Profit / loss": "-€0.20",
+        "Inventory units": "1",
+    }
+    assert "€1,900.00" not in metrics.values()
+    assert "500" not in metrics.values()
+
+    app = click(app, "Buy Bica")
+    metrics = header_metrics(app)
+    assert metrics["Available cash"] == "€1,999.60"
+    assert metrics["Inventory units"] == "2"
+
+    app = click(app, "Complete Day 1")
+    app = click(app, "Confirm Complete Day")
+    progress = v2_storage.get_player_progress(
+        database, session["session_id"], alex["player_id"]
+    )
+    metrics = header_metrics(app)
+    assert metrics["Day / days"] == "2 / 3"
+    assert metrics["Available cash"] == format_euros(progress["cash_cents"])
+    assert metrics["Profit / loss"] == format_euros(
+        progress["cash_cents"] - progress["starting_cash_cents"]
+    )
+    assert metrics["Inventory units"] == str(
+        sum(product["quantity"] for product in progress["products"])
+    )
+
+
 def test_day_zero_shows_location_cards_but_hides_gameplay_until_lease_is_signed(
     tmp_path, monkeypatch
 ):
@@ -213,15 +271,100 @@ def test_day_zero_shows_location_cards_but_hides_gameplay_until_lease_is_signed(
     assert not any(field.label.startswith("Selling price") for field in app.text_input)
 
     app = click(app, "Choose this location")
+    assert any(button.label == "Sign the lease" for button in app.button)
+    assert any(button.label == "Cancel" for button in app.button)
+    assert sum(button.label in {"Sign the lease", "Cancel"} for button in app.button) == 2
     assert v2_storage.get_player_progress(
         database, session["session_id"], player["player_id"]
     )["location"] is None
+    dialog_text = " ".join(item.value for item in app.markdown)
+    assert "Carcavelos / Nova SBE" in dialog_text
+    assert "€30.00" in dialog_text
+    assert any("cannot be changed" in item.value for item in app.warning)
+    app = click(app, "Cancel")
+    assert not any(button.label == "Sign the lease" for button in app.button)
+    assert v2_storage.get_player_progress(
+        database, session["session_id"], player["player_id"]
+    )["location"] is None
+
+    app = click(app, "Choose this location")
     app = click(app, "Sign the lease")
     progress = v2_storage.get_player_progress(
         database, session["session_id"], player["player_id"]
     )
     assert progress["location"]["location_key"] == "carcavelos_nova_sbe"
     assert not any("Day 0 — Choose your café location" in item.value for item in app.header)
+
+
+def test_location_dialog_refresh_repeated_sign_and_two_player_independence(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "location-dialog.sqlite3"
+    session = v2_storage.create_game_session(database)
+    alex = v2_storage.join_game_session(database, session["join_code"], "Alex")
+    blair = v2_storage.join_game_session(database, session["join_code"], "Blair")
+    v2_storage.start_game_session(database, session["session_id"], session["host_credential"])
+
+    alex_app = open_v2_app(monkeypatch, database)
+    alex_app = resume_in_app(alex_app, session, alex)
+    alex_app = navigate(alex_app, "Café Setup")
+    choose_chiado = next(
+        button for button in alex_app.button
+        if button.key == f"v2_choose_location_{alex['player_id']}_chiado"
+    )
+    choose_chiado.click()
+    alex_app = alex_app.run()
+    assert any(button.label == "Sign the lease" for button in alex_app.button)
+    assert any(button.label == "Cancel" for button in alex_app.button)
+    assert sum(
+        button.label in {"Sign the lease", "Cancel"}
+        for button in alex_app.button
+    ) == 2
+
+    # A Streamlit rerun (the AppTest equivalent of refreshing this page) must
+    # keep the dialog pending without writing a lease to SQLite.
+    alex_app = alex_app.run()
+    assert any(button.label == "Sign the lease" for button in alex_app.button)
+    assert v2_storage.get_player_progress(
+        database, session["session_id"], alex["player_id"]
+    )["location"] is None
+
+    alex_app = click(alex_app, "Sign the lease")
+    assert not any(button.label == "Sign the lease" for button in alex_app.button)
+    assert v2_storage.get_player_progress(
+        database, session["session_id"], alex["player_id"]
+    )["location"]["location_key"] == "chiado"
+    alex_app.run()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM player_locations WHERE session_id = ? AND player_id = ?",
+            (session["session_id"], alex["player_id"]),
+        ).fetchone()[0] == 1
+
+    # A fresh browser can resume Alex's lease; Blair independently chooses a
+    # different location without changing Alex's saved location.
+    alex_resume = open_v2_app(monkeypatch, database)
+    alex_resume = resume_in_app(alex_resume, session, alex)
+    alex_progress = v2_storage.get_player_progress(
+        database, session["session_id"], alex["player_id"]
+    )
+    assert alex_progress["location"]["location_key"] == "chiado"
+
+    blair_app = open_v2_app(monkeypatch, database)
+    blair_app = resume_in_app(blair_app, session, blair)
+    blair_app = navigate(blair_app, "Café Setup")
+    next(
+        button for button in blair_app.button
+        if button.key == f"v2_choose_location_{blair['player_id']}_belem"
+    ).click()
+    blair_app = blair_app.run()
+    blair_app = click(blair_app, "Sign the lease")
+    assert v2_storage.get_player_progress(
+        database, session["session_id"], blair["player_id"]
+    )["location"]["location_key"] == "belem"
+    assert v2_storage.get_player_progress(
+        database, session["session_id"], alex["player_id"]
+    )["location"]["location_key"] == "chiado"
 
 
 def test_player_can_edit_menu_and_only_active_products_have_actions(tmp_path, monkeypatch):
@@ -252,6 +395,7 @@ def test_player_can_edit_menu_and_only_active_products_have_actions(tmp_path, mo
     displayed_text = " ".join(str(frame.value) for frame in app.dataframe)
     assert "Category" in displayed_text
     assert "€0.90" in displayed_text
+    assert all("Type" not in frame.value.columns for frame in app.dataframe)
     app = navigate(app, "Today")
     assert any(item.label == "Buy Bica" for item in app.button)
     assert any(item.label == "Buy Matcha latte" for item in app.button)
