@@ -247,19 +247,32 @@ def _show_menu_setup(
     active_menu_keys = [
         product["product_key"] for product in menu_products if product["is_active"]
     ]
+    legacy_menu = len(active_menu_keys) > MAX_MENU_SIZE
     st.subheader("Build your menu")
     selected_menu = st.multiselect(
-        "Choose up to 10 products",
+        "Choose products",
         options=list(menu_by_key),
         default=active_menu_keys,
         format_func=lambda key: (
             f"{menu_by_key[key]['name']} · {menu_by_key[key]['category']} · "
             f"reference {format_euros(menu_by_key[key]['reference_price_cents'])}"
         ),
-        max_selections=MAX_MENU_SIZE,
+        # Legacy saves may already exceed the new cap. Let players remove items
+        # from those menus without hiding any saved selections; saving stays blocked.
+        max_selections=None if legacy_menu else MAX_MENU_SIZE,
         key=f"v2_menu_select_{player['player_id']}_{progress['current_day']}",
         disabled=not can_trade,
     )
+    st.caption(f"{len(selected_menu)} of {MAX_MENU_SIZE} products selected")
+    if not selected_menu:
+        st.info("Select at least one product for your menu.")
+    if len(selected_menu) >= MAX_MENU_SIZE:
+        st.info(f"Maximum reached: you can select up to {MAX_MENU_SIZE} products.")
+    if legacy_menu:
+        st.warning(
+            f"This saved menu has {len(active_menu_keys)} products. Its data is preserved; "
+            f"reduce it to {MAX_MENU_SIZE} or fewer before saving the menu again."
+        )
     st.caption(
         "A menu needs at least one drink. Changes apply to the upcoming day. "
         "Removing a product keeps its unsold stock."
@@ -281,7 +294,7 @@ def _show_menu_setup(
     if st.button(
         "Save menu",
         key=f"v2_save_menu_{player['player_id']}_{progress['current_day']}",
-        disabled=not can_trade,
+        disabled=not can_trade or not selected_menu or len(selected_menu) > MAX_MENU_SIZE,
         use_container_width=True,
     ):
         try:

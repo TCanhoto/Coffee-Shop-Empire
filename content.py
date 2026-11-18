@@ -65,4 +65,4 @@ PRODUCT_AFFINITIES = {
 # New V2 players start with a small valid menu. Each can replace it before a
 # trading day, and menu changes are always private to that player.
 DEFAULT_MENU_KEYS = ("bica", "galao", "pastel_de_nata")
-MAX_MENU_SIZE = 10
+MAX_MENU_SIZE = 5

@@ -9,7 +9,7 @@ V2 will let several people join a shared game and independently manage cafés in
 - Multiplayer sessions with a host, a six-character joining code, and independent players.
 - Eight café locations with agreed rent, foot traffic, and customer composition.
 - Five customer personas with different product preferences and price sensitivity.
-- An expanded product catalogue; each player's menu can contain no more than 10 products.
+- An expanded product catalogue; each player's menu can contain no more than 5 products.
 - Deterministic demand based on agreed location, persona, product, and price rules.
 - Improved daily progression, dashboard, leaderboard, final player performance report, and mobile-friendly screens.
 
@@ -49,7 +49,7 @@ Trading is rejected until that player has confirmed a location. Step 2.4 uses th
 
 `content.py` contains the five approved persona descriptions and price-sensitivity labels, the approved 12 products with categories and cent-based costs/reference prices, and the approved 0/1/3 affinity matrix. Step 2.4 uses this affinity data in the approved demand engine.
 
-Each player begins with a valid starter menu of Bica, Galão, and Pastel de nata, and can edit it for the current upcoming day. A saved menu can contain at most 10 distinct products and must include a drink. Menu records are scoped to the player's session and player IDs. Purchasing, setting prices, and trading apply only to active menu products. Removing a product leaves its inventory untouched; its stock is shown as off-menu stock and can be sold again if the product is re-added. Menu submissions include the displayed upcoming day so a stale page cannot change the menu after that day has been completed.
+Each player begins with a valid starter menu of Bica, Galão, and Pastel de nata, and can edit it for the current upcoming day. A saved menu can contain between 1 and 5 distinct products and must include a drink. Menu records are scoped to the player's session and player IDs. Purchasing, setting prices, and trading apply only to active menu products. Removing a product leaves its inventory untouched; its stock is shown as off-menu stock and can be sold again if the product is re-added. Menu submissions include the displayed upcoming day so a stale page cannot change the menu after that day has been completed. Legacy saves with larger menus remain intact until the player reduces and saves them.
 
 ## Step 2.4 delivered boundary — deterministic demand engine
 
@@ -80,7 +80,7 @@ The multiplayer interface is organized into Host / Join Game, Café Setup, Today
 1. **Phase 1A — Multiplayer data foundation:** sessions, player records, scoped inventory/prices/results, persistence, and recovery credential. (Implemented.)
 2. **Phase 1B — Host and join flow:** create a session, share/join by code, validate host actions, and rejoin a player securely. (Implemented.)
 3. **Phase 1C — Independent café gameplay:** player-scoped buying, pricing, daily results, and protected day completion using the V1 rules. (Implemented.)
-4. **Phase 2 — Locations and menu catalogue:** eight locations, expanded products, and the 10-item limit.
+4. **Phase 2 — Locations and menu catalogue:** eight locations, expanded products, and the 5-item limit.
 5. **Phase 3 — Persona-based demand:** deterministic demand engine (approved and implemented).
 6. **Phase 4 — Shared session progression:** host-controlled shared day resolution and inactive-player rules.
 7. **Phase 5 — Leaderboard and final report:** session-specific leaderboard and per-player final report implemented.

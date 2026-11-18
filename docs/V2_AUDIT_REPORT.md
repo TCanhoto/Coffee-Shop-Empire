@@ -35,7 +35,7 @@ All automated game writes use temporary SQLite databases.
 
 The full suite includes invalid codes, blank/duplicate nicknames, wrong recovery
 credentials, non-positive/malformed prices, invalid quantities (zero, negative,
-fractional, text and boolean), menus without drinks, more than ten menu items,
+fractional, text and boolean), empty menus, menus without drinks, more than five menu items,
 overspending, stock shortages, zero sales, negative results, bankruptcy,
 repeated day completion, locked location changes, stale menu submissions,
 post-completion actions and cross-session access.
