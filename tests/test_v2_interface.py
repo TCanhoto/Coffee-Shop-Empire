@@ -379,9 +379,14 @@ def test_player_can_edit_menu_and_only_active_products_have_actions(tmp_path, mo
     app = click(app, "Sign the lease")
     app = navigate(app, "Café Setup")
 
-    menu = next(widget for widget in app.multiselect if widget.label == "Choose up to 10 products")
-    menu.set_value(["bica", "matcha_latte", "plant_based_toastie"]).run()
+    menu = next(widget for widget in app.multiselect if widget.label == "Choose products")
+    menu.set_value([
+        "bica", "matcha_latte", "plant_based_toastie", "pastel_de_nata", "brownie"
+    ]).run()
+    assert any("5 of 5 products selected" in item.value for item in app.caption)
+    assert any("Maximum reached" in item.value for item in app.info)
     app = click(app, "Save menu")
+    assert any("3 of 5 products selected" in item.value for item in app.caption)
 
     progress = v2_storage.get_player_progress(
         database, session["session_id"], player["player_id"]
@@ -390,6 +395,8 @@ def test_player_can_edit_menu_and_only_active_products_have_actions(tmp_path, mo
         "bica",
         "matcha_latte",
         "plant_based_toastie",
+        "pastel_de_nata",
+        "brownie",
     }
     assert not any(item.label == "Buy Bica" for item in app.button)
     displayed_text = " ".join(str(frame.value) for frame in app.dataframe)

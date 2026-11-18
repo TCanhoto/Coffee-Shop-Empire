@@ -164,6 +164,15 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                     ON DELETE CASCADE
             );
 
+            CREATE TRIGGER IF NOT EXISTS player_menu_maximum_size
+            BEFORE INSERT ON player_menu
+            WHEN (SELECT COUNT(*) FROM player_menu
+                  WHERE session_id = NEW.session_id AND player_id = NEW.player_id)
+                 >= 5
+            BEGIN
+                SELECT RAISE(ABORT, 'A menu can contain at most 5 products.');
+            END;
+
             CREATE TABLE IF NOT EXISTS player_locations (
                 session_id TEXT NOT NULL,
                 player_id TEXT NOT NULL,
@@ -864,6 +873,8 @@ def set_player_menu(
     if not isinstance(product_keys, (list, tuple)):
         raise ValueError("Menu selections must be a list of products.")
     selected = list(product_keys)
+    if not selected:
+        raise ValueError("Your active menu must include at least one product.")
     if len(selected) > MAX_MENU_SIZE:
         raise ValueError(f"A menu can contain at most {MAX_MENU_SIZE} products.")
     if any(not isinstance(key, str) for key in selected):

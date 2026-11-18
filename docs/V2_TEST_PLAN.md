@@ -54,7 +54,7 @@
 - The four configured Step 2.1 locations, their persona percentages summing to 100, per-player selection/persistence, lease locking, and trading blocked before lease confirmation.
 - The 12 approved Step 2.2 catalogue records and all five personas.
 - A complete affinity entry for every product/persona pair using only scores 0, 1, or 3.
-- Per-player menus surviving resume, independent menus, the 10-product limit, duplicate rejection, and the requirement for at least one drink.
+- Per-player menus surviving resume, independent menus, the 5-product limit in validation and SQLite, duplicate rejection, legacy menu preservation/reduction, and the requirement for at least one drink.
 - Purchases and prices restricted to active menu products; invalid prices leave saved state unchanged.
 - Removed menu products retaining unsold stock, and later menu changes leaving completed trading history unchanged.
 - AppTest showing category and reference price details and actions only for current menu products.

@@ -103,7 +103,8 @@ def test_invalid_menus_are_rejected_without_changing_saved_menu(tmp_path):
     product_keys = [product.key for product in PRODUCT_CATALOGUE]
 
     invalid_menus = [
-        (product_keys[:11], f"at most {MAX_MENU_SIZE}"),
+        ([], "at least one product"),
+        (product_keys[:6], f"at most {MAX_MENU_SIZE}"),
         (["bica", "bica"], "more than once"),
         (["pastel_de_nata", "brownie"], "at least one drink"),
     ]
@@ -130,6 +131,70 @@ def test_invalid_menus_are_rejected_without_changing_saved_menu(tmp_path):
     assert len(
         active_menu(get_player_progress(database, session["session_id"], player["player_id"]))
     ) == MAX_MENU_SIZE
+
+
+def test_sqlite_enforces_menu_cap_without_affecting_other_players(tmp_path):
+    database = tmp_path / "game-v2.sqlite3"
+    session = make_session(database)
+    first = join(database, session, "First")
+    second = join(database, session, "Second")
+    start_game_session(database, session["session_id"], session["host_credential"])
+    five_products = [product.key for product in PRODUCT_CATALOGUE[:5]]
+    set_player_menu(database, session["session_id"], first["player_id"], five_products,
+                    expected_day=1)
+
+    with sqlite3.connect(database) as connection:
+        with pytest.raises(sqlite3.IntegrityError, match="at most 5"):
+            connection.execute(
+                "INSERT INTO player_menu (session_id, player_id, product_key) VALUES (?, ?, ?)",
+                (session["session_id"], first["player_id"], "brownie"),
+            )
+
+    assert active_menu(
+        get_player_progress(database, session["session_id"], second["player_id"])
+    ) == set(DEFAULT_MENU_KEYS)
+
+
+def test_legacy_menu_is_preserved_and_can_be_reduced_before_next_save(tmp_path):
+    database = tmp_path / "game-v2.sqlite3"
+    session = make_session(database)
+    player = join(database, session, "Legacy")
+    start_game_session(database, session["session_id"], session["host_credential"])
+    legacy_keys = [product.key for product in PRODUCT_CATALOGUE[:6]]
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER player_menu_maximum_size")
+        connection.execute(
+            "DELETE FROM player_menu WHERE session_id = ? AND player_id = ?",
+            (session["session_id"], player["player_id"]),
+        )
+        connection.executemany(
+            "INSERT INTO player_menu (session_id, player_id, product_key) VALUES (?, ?, ?)",
+            [(session["session_id"], player["player_id"], key) for key in legacy_keys],
+        )
+        connection.execute(
+            "UPDATE player_inventory SET quantity = 7 "
+            "WHERE session_id = ? AND player_id = ? AND product_key = 'brownie'",
+            (session["session_id"], player["player_id"]),
+        )
+    initialize_v2_database(database)
+
+    assert active_menu(
+        get_player_progress(database, session["session_id"], player["player_id"])
+    ) == set(legacy_keys)
+    with pytest.raises(ValueError, match="at most 5"):
+        set_player_menu(database, session["session_id"], player["player_id"], legacy_keys,
+                        expected_day=1)
+    assert active_menu(
+        get_player_progress(database, session["session_id"], player["player_id"])
+    ) == set(legacy_keys)
+
+    reduced = legacy_keys[:5]
+    set_player_menu(database, session["session_id"], player["player_id"], reduced,
+                    expected_day=1)
+    progress = get_player_progress(database, session["session_id"], player["player_id"])
+    assert active_menu(progress) == set(reduced)
+    assert next(item["quantity"] for item in progress["products"]
+                if item["product_key"] == "brownie") == 7
 
 
 def test_menus_are_independent_between_players(tmp_path):
