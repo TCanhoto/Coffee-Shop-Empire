@@ -33,8 +33,9 @@ def snapshot(database):
                 for (name,) in tables}
 
 
-def test_three_players_complete_seven_days_with_reconciled_saved_results(tmp_path):
+def test_three_players_complete_seven_days_with_reconciled_saved_results(tmp_path, monkeypatch):
     database = tmp_path / "integration.sqlite3"
+    monkeypatch.setattr(game, "_get_or_create_session_event", lambda *args: (None, None))
     session, players = start_game(database)
     sid = session["session_id"]
     assert session["trading_days"] == 7
@@ -98,8 +99,9 @@ def test_three_players_complete_seven_days_with_reconciled_saved_results(tmp_pat
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
-def test_three_concurrent_writers_preserve_player_balances(tmp_path):
+def test_three_concurrent_writers_preserve_player_balances(tmp_path, monkeypatch):
     database = tmp_path / "writers.sqlite3"
+    monkeypatch.setattr(game, "_get_or_create_session_event", lambda *args: (None, None))
     session, players = start_game(database)
     barrier = Barrier(3)
     def act(player):
@@ -191,9 +193,10 @@ import json, sys
 import v2_storage as game
 database, code, nickname, credential = json.load(sys.stdin)
 progress = game.resume_player_by_credentials(database, code, nickname, credential)
-assert progress['cash_cents'] == 197700
+history = game.load_player_trade_history(database, progress['session_id'], progress['player_id'])
+assert progress['cash_cents'] == history[0]['cash_cents_after']
 assert progress['current_day'] == 2
-assert len(game.load_player_trade_history(database, progress['session_id'], progress['player_id'])) == 1
+assert len(history) == 1 and history[0]['event'] is not None
 print('resumed')
 """
     result = subprocess.run(

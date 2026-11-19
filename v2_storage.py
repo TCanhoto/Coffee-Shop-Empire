@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 from pathlib import Path
+import random
 import secrets
 import sqlite3
 import uuid
@@ -22,6 +23,7 @@ from business_logic import (
     calculate_v2_trade,
     price_to_cents,
 )
+import v2_events
 
 
 V2_DATABASE_PATH = Path(__file__).resolve().parent / "campus_tycoon_v2.sqlite3"
@@ -230,6 +232,40 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                     ON DELETE CASCADE,
                 FOREIGN KEY (session_id, player_id, product_key)
                     REFERENCES player_inventory(session_id, player_id, product_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS session_event_plans (
+                session_id TEXT PRIMARY KEY REFERENCES game_sessions(session_id)
+                    ON DELETE CASCADE,
+                planned_event_count INTEGER NOT NULL
+                    CHECK (planned_event_count IN (1, 2)),
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS player_day_events (
+                session_id TEXT NOT NULL,
+                player_id TEXT NOT NULL,
+                day_number INTEGER NOT NULL CHECK (day_number > 0),
+                event_key TEXT NOT NULL,
+                event_name TEXT NOT NULL,
+                polarity TEXT NOT NULL CHECK (polarity IN ('positive', 'negative')),
+                location_key TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                effect TEXT NOT NULL CHECK (
+                    effect IN ('inventory_loss', 'demand_multiplier')
+                ),
+                effect_percent INTEGER NOT NULL CHECK (effect_percent > 0),
+                status TEXT NOT NULL CHECK (status IN ('scheduled', 'occurred')),
+                outcome_json TEXT,
+                created_at TEXT NOT NULL,
+                occurred_at TEXT,
+                PRIMARY KEY (session_id, player_id, day_number),
+                FOREIGN KEY (session_id, player_id)
+                    REFERENCES players(session_id, player_id) ON DELETE CASCADE,
+                CHECK (
+                    (status = 'scheduled' AND outcome_json IS NULL AND occurred_at IS NULL)
+                    OR (status = 'occurred' AND outcome_json IS NOT NULL AND occurred_at IS NOT NULL)
+                )
             );
 
             CREATE TRIGGER IF NOT EXISTS players_id_is_immutable
@@ -746,6 +782,129 @@ def _location_from_row(row: sqlite3.Row) -> dict:
     return location
 
 
+def _future_event_slots(
+    connection: sqlite3.Connection,
+    session_id: str,
+    current_player_id: str,
+    current_day: int,
+) -> list[dict]:
+    """Return eligible player-days after the day being completed now."""
+
+    players = connection.execute(
+        """SELECT p.player_id, p.current_day, p.is_bankrupt, s.trading_days,
+                  l.location_key
+           FROM players AS p
+           JOIN game_sessions AS s ON s.session_id = p.session_id
+           JOIN player_locations AS pl
+             ON pl.session_id = p.session_id AND pl.player_id = p.player_id
+           JOIN locations AS l ON l.location_key = pl.location_key
+           WHERE p.session_id = ? AND p.is_bankrupt = 0
+             AND p.current_day <= s.trading_days""",
+        (session_id,),
+    ).fetchall()
+    slots = []
+    for player in players:
+        for day_number in range(player["current_day"], player["trading_days"] + 1):
+            if player["player_id"] == current_player_id and day_number == current_day:
+                continue
+            already_assigned = connection.execute(
+                """SELECT 1 FROM player_day_events
+                   WHERE session_id = ? AND player_id = ? AND day_number = ?""",
+                (session_id, player["player_id"], day_number),
+            ).fetchone()
+            if already_assigned is None:
+                slots.append(
+                    {
+                        "player_id": player["player_id"],
+                        "day_number": day_number,
+                        "location_key": player["location_key"],
+                    }
+                )
+    return slots
+
+
+def _insert_event_assignment(
+    connection: sqlite3.Connection,
+    session_id: str,
+    player_id: str,
+    day_number: int,
+    location_key: str,
+) -> None:
+    event = v2_events.choose_location_event(location_key)
+    connection.execute(
+        """INSERT INTO player_day_events
+           (session_id, player_id, day_number, event_key, event_name, polarity,
+            location_key, explanation, effect, effect_percent, status,
+            outcome_json, created_at, occurred_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', NULL, ?, NULL)""",
+        (
+            session_id,
+            player_id,
+            day_number,
+            event.key,
+            event.name,
+            event.polarity,
+            event.location_key,
+            event.explanation,
+            event.effect,
+            event.percent,
+            _now_utc(),
+        ),
+    )
+
+
+def _get_or_create_session_event(
+    connection: sqlite3.Connection,
+    session_id: str,
+    player_id: str,
+    day_number: int,
+    location_key: str,
+) -> tuple[sqlite3.Row | None, v2_events.GameEvent | None]:
+    """Persist one session plan and return this day's event, if assigned."""
+
+    plan = connection.execute(
+        "SELECT planned_event_count FROM session_event_plans WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    if plan is None:
+        future_slots = _future_event_slots(
+            connection, session_id, player_id, day_number
+        )
+        event_count = v2_events.choose_event_count(bool(future_slots))
+        connection.execute(
+            """INSERT INTO session_event_plans
+               (session_id, planned_event_count, created_at) VALUES (?, ?, ?)""",
+            (session_id, event_count, _now_utc()),
+        )
+        _insert_event_assignment(
+            connection, session_id, player_id, day_number, location_key
+        )
+        if event_count == 2:
+            target = random.choice(future_slots)
+            _insert_event_assignment(
+                connection,
+                session_id,
+                target["player_id"],
+                target["day_number"],
+                target["location_key"],
+            )
+
+    assignment = connection.execute(
+        """SELECT * FROM player_day_events
+           WHERE session_id = ? AND player_id = ? AND day_number = ?""",
+        (session_id, player_id, day_number),
+    ).fetchone()
+    if assignment is None:
+        return None, None
+    if assignment["status"] != "scheduled":
+        raise ValueError("This day's event has already been processed.")
+    try:
+        event = v2_events.EVENTS_BY_KEY[assignment["event_key"]]
+    except KeyError:
+        raise ValueError("The saved event is not recognized.") from None
+    return assignment, event
+
+
 def list_locations(database_path: str | Path = V2_DATABASE_PATH) -> list[dict]:
     """Load the fixed location catalogue, including internal persona data."""
 
@@ -1099,9 +1258,52 @@ def trade_player_day(
                 }
                 for row in product_rows
             ]
-            result = calculate_v2_trade(player["cash_cents"], location, products)
+            _, event = _get_or_create_session_event(
+                connection, session_id, player_id, requested_day,
+                location["location_key"],
+            )
+            event_record = None
+            event_outcome = None
+            trade_location = location
+            trade_products = products
+            if event is not None:
+                trade_location, trade_products, event_outcome = v2_events.apply_event(
+                    event, location, products
+                )
+            result = calculate_v2_trade(
+                player["cash_cents"], trade_location, trade_products
+            )
             totals = result["totals"]
             day_number = player["current_day"]
+            if event is not None:
+                event_outcome["actual_total_demand"] = totals["demand"]
+                event_outcome["actual_units_sold"] = totals["units_sold"]
+                event_outcome["customers_served"] = result["customers_served"]
+                event_update = connection.execute(
+                    """UPDATE player_day_events
+                       SET status = 'occurred', outcome_json = ?, occurred_at = ?
+                       WHERE session_id = ? AND player_id = ? AND day_number = ?
+                         AND status = 'scheduled'""",
+                    (
+                        json.dumps(event_outcome, sort_keys=True),
+                        _now_utc(),
+                        session_id,
+                        player_id,
+                        day_number,
+                    ),
+                )
+                if event_update.rowcount != 1:
+                    raise ValueError("This day's event could not be recorded.")
+                event_record = {
+                    "key": event.key,
+                    "name": event.name,
+                    "polarity": event.polarity,
+                    "location_key": event.location_key,
+                    "explanation": event.explanation,
+                    "effect": event.effect,
+                    "effect_percent": event.percent,
+                    "outcome": event_outcome,
+                }
             connection.execute(
                 """INSERT INTO player_trading_days
                     (session_id, player_id, day_number, cash_cents_after,
@@ -1211,6 +1413,7 @@ def trade_player_day(
             "food_opportunities_not_fulfilled"
         ],
         "served_customers_by_persona": result["served_customers_by_persona"],
+        "event": event_record,
     }
 
 
@@ -1253,9 +1456,31 @@ def load_player_trade_history(
                    ORDER BY p.product_key""",
                 (session_id, player_id, day["day_number"]),
             ).fetchall()
+            event_row = connection.execute(
+                """SELECT event_key, event_name, polarity, location_key,
+                          explanation, effect, effect_percent, outcome_json
+                   FROM player_day_events
+                   WHERE session_id = ? AND player_id = ? AND day_number = ?
+                     AND status = 'occurred'""",
+                (session_id, player_id, day["day_number"]),
+            ).fetchone()
+            event = None
+            if event_row is not None:
+                event = {
+                    "key": event_row["event_key"],
+                    "name": event_row["event_name"],
+                    "polarity": event_row["polarity"],
+                    "location_key": event_row["location_key"],
+                    "explanation": event_row["explanation"],
+                    "effect": event_row["effect"],
+                    "effect_percent": event_row["effect_percent"],
+                    "outcome": json.loads(event_row["outcome_json"]),
+                }
+                event["impact_summary"] = event["outcome"]["impact_summary"]
             history.append(
                 {
                     "day": day["day_number"],
+                    "event": event,
                     "cash_cents_after": day["cash_cents_after"],
                     "potential_visitors": day["potential_visitors"],
                     "customers_served": day["customers_served"],

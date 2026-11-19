@@ -15,7 +15,7 @@ V2 will let several people join a shared game and independently manage cafés in
 
 Optional later work, only after the core game is accepted: marketing campaigns, market research reports, and café space customisation.
 
-Out of scope: random demand or events, a What-if panel, AI-controlled competitors, advanced financial accounting, paid AI APIs, and unnecessary technologies.
+Out of scope: random demand, a What-if panel, AI-controlled competitors, advanced financial accounting, paid AI APIs, and unnecessary technologies. Location events are an approved exception to the original no-events scope; demand itself remains deterministic.
 
 ## Intentional changes from V1
 
@@ -74,6 +74,10 @@ Finished players (including players whose game ended through bankruptcy) receive
 ## Step 3.4 delivered boundary — UI and mobile experience
 
 The multiplayer interface is organized into Host / Join Game, Café Setup, Today, Dashboard, Leaderboard, and Final Report. Host, join, and resume are choices inside the entry section. Café Setup contains location selection and saved menu editing; Today contains pricing, purchasing, progress, and daily results. Dashboard, leaderboard, and final report are separate views. A warm coffee-and-cream theme with terracotta actions, product/location emojis, compact metrics, and mobile spacing is applied with Streamlit CSS only. Completing a day now requires a second explicit confirmation; cancelling leaves game data unchanged. Existing session and player storage remain authoritative, so navigation does not discard accepted choices.
+
+## Task C3 — location events
+
+The deterministic demand engine is unchanged. Each session's first successfully completed player-day receives a randomly selected positive or negative event for that player's location; the session has one event, or two when another eligible player-day exists (equal probability). Any second event is assigned once to a randomly selected future player-day. A scheduled event is shown as an occurred event only after that player successfully completes the assigned day. Event selection, effect, trade, inventory changes, and history are saved atomically. Demand effects adjust potential visitors before calling the unchanged engine; inventory effects remove a rounded share of stock before sales. Events never alter rent, prices, purchase costs, or another player's state. The Today page and Dashboard show saved outcomes, including after resume; page renders do not roll or assign events.
 
 ## Suggested next stages
 
