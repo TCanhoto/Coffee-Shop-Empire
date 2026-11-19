@@ -6,6 +6,7 @@ import v2_storage
 from content import MAX_MENU_SIZE
 from business_logic import format_euros, price_to_cents
 from demand_engine import calculate_v2_demand
+from estimate_ranges import demand_estimate_range
 from v2_ui_components import render_sticky_business_header
 
 
@@ -415,6 +416,10 @@ def _show_player_cafe(
             "preference. When whole visitors must be split, largest remainders "
             "are assigned using the documented fixed persona and product order."
         )
+    st.caption(
+        "Profit is not forecast before your final purchases and trading. "
+        "Completed-day results, including profit and rent, appear on Dashboard."
+    )
     for product in progress["products"]:
         if not product["is_active"]:
             continue
@@ -458,9 +463,11 @@ def _show_player_cafe(
                     progress["location"], preview_products
                 )
                 demand = preview["products"][key]["demand"]
+                demand_low, demand_high = demand_estimate_range(demand)
                 st.write(
-                    f"Estimated menu demand at this price: **{demand} units/day** "
-                    "before applying stock limits."
+                    f"Estimated demand range at this price: **{demand_low:,}–"
+                    f"{demand_high:,} units/day** before applying stock limits. "
+                    "This is a planning range, not a guaranteed minimum or maximum."
                 )
             if st.button(
                 f"Save price for {product['name']}",
