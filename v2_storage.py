@@ -5,7 +5,7 @@ The functions in this module require both a session ID and player ID for
 player-specific actions. Nicknames are for display, never identity.
 """
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -428,6 +428,18 @@ def get_game_session(
     if row is None:
         raise ValueError("Game session was not found.")
     return dict(row)
+
+
+def get_game_session_status(database_path: str | Path, session_id: str) -> str:
+    """Check an existing session without initializing or writing the database."""
+    database_uri = Path(database_path).resolve().as_uri()
+    with closing(sqlite3.connect(f"{database_uri}?mode=ro", uri=True)) as connection:
+        row = connection.execute(
+            "SELECT status FROM game_sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+    if row is None:
+        raise ValueError("Game session was not found.")
+    return row[0]
 
 
 def get_game_session_by_code(
@@ -955,6 +967,9 @@ def purchase_player_stock(
     player_id: str,
     product_key: str,
     quantity: object,
+    *,
+    expected_day: int | None = None,
+    expected_stock: int | None = None,
 ) -> int:
     """Purchase stock for exactly one player, atomically reducing cash."""
 
@@ -975,6 +990,12 @@ def purchase_player_stock(
             ).fetchone()
             if product is None:
                 raise ValueError("That product is not in this player's active menu.")
+            # Two submits of the same displayed purchase cannot both succeed.
+            if (
+                (expected_day is not None and player["current_day"] != expected_day)
+                or (expected_stock is not None and product["quantity"] != expected_stock)
+            ):
+                raise ValueError("The day or stock changed. Refresh before buying again.")
             result = calculate_purchase(
                 player["cash_cents"],
                 product["quantity"],

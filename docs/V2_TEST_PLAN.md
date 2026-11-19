@@ -150,8 +150,28 @@ uv run pytest tests/test_v2_storage.py
 1. Launch with `uv run streamlit run app.py` and choose **Campus Tycoon 2.0 · Multiplayer** in the left version selector.
 2. Under **Host Game**, create a session using defaults or values from the allowed ranges. Save both the six-character code and the private host credential.
 3. In another browser or private window, choose **Join Game**, enter the code and a nickname, and save the one-time recovery credential.
-4. Confirm the nickname appears in the host waiting room. The host selects **Start Game**; the player can refresh their waiting room to see the active status.
+4. Confirm the nickname appears in the host waiting room. The host selects **Start Game**, and the player should move automatically to Café Setup.
 5. Test resume in a fresh browser session using the code, nickname, and recovery credential. Try an incorrect credential and confirm access is denied.
 6. Confirm an ordinary player cannot start the session and a new player cannot join after the host starts it.
 7. After start, resume each player in a separate browser. Buy stock and save a different price for Player A; confirm Player B's cash, stock, and price do not change.
 8. Complete a day for Player A and refresh both browsers. Confirm only Player A advanced and their day appears once in history. Submit the same old day from a second tab and confirm it is rejected.
+
+
+## Navigation and purchase acceptance
+
+Use three separate browser sessions and a disposable game. Leave two players in
+the lobby while the host starts. Both connected players should reach Café Setup
+within a few seconds without a manual refresh. Close and reopen a player session
+and use Resume Game to verify routing based on the saved lease and trading day.
+
+On a desktop browser and iPhone Safari, edit quantities on adjacent product
+cards using the keyboard and steppers. Check Tab, Enter and rapid taps. Confirm
+that editing never buys stock, that focus stays with the intended edit, and
+that a Buy action affects only the named product. Try a quick double tap on one
+Buy action and check inventory and cash once the page settles.
+
+Save a valid menu and confirm Today opens with a success message. Try a menu
+without a drink and confirm Café Setup stays open with the error. Complete a
+day, check its saved results in Dashboard and select Continue to the next day.
+Confirm that Continue leaves cash, stock and history unchanged. Repeat for the
+final day and verify that Dashboard offers the Final Report.

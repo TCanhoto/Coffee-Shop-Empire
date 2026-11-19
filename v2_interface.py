@@ -1,5 +1,7 @@
 """Small Streamlit screens for creating, joining, and resuming V2 sessions."""
 
+import sqlite3
+
 import streamlit as st
 
 import v2_storage
@@ -18,6 +20,20 @@ def _save_player_identity(progress: dict, recovery_credential: str) -> None:
     }
 
 
+def _navigate_to(section: str) -> None:
+    # The selectbox already exists in this run. Apply the new choice on rerun.
+    st.session_state["v2_next_section"] = section
+    st.rerun()
+
+
+def _player_destination(progress: dict) -> str:
+    if progress["location"] is None:
+        return "Café Setup"
+    if progress["current_day"] > 1:
+        return "Dashboard"
+    return "Today"
+
+
 def _session_summary(session: dict) -> None:
     st.write(f"**Game code:** `{session['join_code']}`")
     st.write(f"Trading days: {session['trading_days']}")
@@ -26,7 +42,7 @@ def _session_summary(session: dict) -> None:
 
 
 def _show_management_dashboard(
-    progress: dict, history: list[dict], total_days: int
+    progress: dict, history: list[dict], total_days: int, can_trade: bool
 ) -> None:
     """Render current player metrics and charts from saved results only."""
 
@@ -45,6 +61,13 @@ def _show_management_dashboard(
         day_value = f"{progress['current_day']} of {total_days}"
 
     st.subheader("Management Dashboard")
+    if history:
+        _show_day_results(history[-1])
+        if can_trade:
+            if st.button(f"Continue to Day {progress['current_day']}", type="primary"):
+                _navigate_to("Today")
+        elif st.button("View Final Report", type="primary"):
+            _navigate_to("Final Report")
     first_row = st.columns(2, gap="small")
     first_row[0].metric("Available cash", format_euros(progress["cash_cents"]))
     first_row[1].metric("Current day", day_value)
@@ -294,9 +317,11 @@ def _show_menu_setup(
             )
         except ValueError as error:
             st.error(str(error))
+        except sqlite3.Error:
+            st.error("The menu could not be saved. Please try again.")
         else:
             st.session_state["v2_player_action_message"] = "Your café menu was saved."
-            st.rerun()
+            _navigate_to("Today")
 
     if progress["location"]:
         st.subheader("Signed location")
@@ -319,6 +344,7 @@ def _show_player_cafe(
     history = v2_storage.load_player_trade_history(
         database, session["session_id"], player["player_id"]
     )
+    _show_new_player_credential()
     action_message = st.session_state.pop("v2_player_action_message", None)
     if action_message:
         st.success(action_message)
@@ -356,7 +382,7 @@ def _show_player_cafe(
             text=f"{min(progress['current_day'] - 1, last_day)} of {last_day} days completed",
         )
     if section == "Dashboard":
-        _show_management_dashboard(progress, history, last_day)
+        _show_management_dashboard(progress, history, last_day, can_trade)
         return
     if section == "Café Setup":
         _show_menu_setup(database, session, player, progress, can_trade)
@@ -469,19 +495,20 @@ def _show_player_cafe(
                         f"{product['name']} selling price saved as {format_euros(saved)}."
                     )
                     st.rerun()
-            quantity = st.number_input(
-                f"Units to buy ({product['name']})",
-                min_value=1,
-                value=1,
-                step=1,
-                key=f"v2_quantity_{player['player_id']}_{key}",
-                disabled=not can_trade,
-            )
-            if st.button(
-                f"Buy {product['name']}",
-                key=f"v2_buy_{player['player_id']}_{key}",
-                disabled=not can_trade,
-            ):
+            # A successful purchase changes stock and invalidates the old form.
+            day = progress["current_day"]
+            stock = product["quantity"]
+            form_key = f"v2_purchase_{player['player_id']}_{key}_{day}_{stock}"
+            with st.form(form_key, enter_to_submit=False, border=False):
+                quantity = st.number_input(
+                    f"Units to buy ({product['name']})",
+                    min_value=1,
+                    value=1,
+                    step=1,
+                    key=f"{form_key}_quantity",
+                )
+                buy = st.form_submit_button(f"Buy {product['name']}")
+            if buy:
                 try:
                     total = v2_storage.purchase_player_stock(
                         database,
@@ -489,6 +516,8 @@ def _show_player_cafe(
                         player["player_id"],
                         key,
                         int(quantity),
+                        expected_day=day,
+                        expected_stock=stock,
                     )
                 except ValueError as error:
                     st.error(str(error))
@@ -552,8 +581,10 @@ def _show_player_cafe(
                 )
             except ValueError as error:
                 st.error(str(error))
+            except sqlite3.Error:
+                st.error("The day could not be completed. Please try again.")
             else:
-                st.session_state["v2_last_trade_message"] = (
+                st.session_state["v2_player_action_message"] = (
                     f"Day {result['day']} completed. Revenue: "
                     f"{format_euros(result['totals']['revenue_cents'])}. "
                     f"Rent paid: {format_euros(result['rent_paid_cents'])} of "
@@ -563,7 +594,7 @@ def _show_player_cafe(
                     + (" Your café is bankrupt and your game has ended."
                        if result["bankrupt"] else "")
                 )
-                st.rerun()
+                _navigate_to("Dashboard")
         if cancel_col.button(
             "Cancel",
             key=f"v2_cancel_complete_{player['player_id']}_{progress['current_day']}",
@@ -572,48 +603,48 @@ def _show_player_cafe(
             st.session_state.pop(confirm_key, None)
             st.rerun()
 
-    trade_message = st.session_state.pop("v2_last_trade_message", None)
-    if trade_message:
-        st.success(trade_message)
     if history:
-        latest = history[-1]
-        st.subheader(f"Day {latest['day']} results")
-        st.dataframe(
-            [
-                {
-                    "Product": item["name"],
-                    "Demand": item["demand"],
-                    "Units sold": item["units_sold"],
-                    "Revenue": format_euros(item["revenue_cents"]),
-                    "Cost of goods sold": format_euros(
-                        item["cost_of_goods_sold_cents"]
-                    ),
-                    "Gross profit": format_euros(item["gross_profit_cents"]),
-                }
-                for item in latest["products"]
-            ]
-            + [
-                {
-                    "Product": "TOTAL",
-                    "Demand": latest["totals"]["demand"],
-                    "Units sold": latest["totals"]["units_sold"],
-                    "Revenue": format_euros(latest["totals"]["revenue_cents"]),
-                    "Cost of goods sold": format_euros(
-                        latest["totals"]["cost_of_goods_sold_cents"]
-                    ),
-                    "Gross profit": format_euros(
-                        latest["totals"]["gross_profit_cents"]
-                    ),
-                }
-            ],
-            hide_index=True,
-            use_container_width=True,
-        )
-        st.caption(
-            f"Rent: {format_euros(latest['rent_paid_cents'])} paid of "
-            f"{format_euros(latest['rent_due_cents'])} due; "
-            f"{format_euros(latest['rent_shortfall_cents'])} forgiven."
-        )
+        _show_day_results(history[-1])
+
+
+def _show_day_results(latest: dict) -> None:
+    st.subheader(f"Day {latest['day']} results")
+    st.dataframe(
+        [
+            {
+                "Product": item["name"],
+                "Demand": item["demand"],
+                "Units sold": item["units_sold"],
+                "Revenue": format_euros(item["revenue_cents"]),
+                "Cost of goods sold": format_euros(
+                    item["cost_of_goods_sold_cents"]
+                ),
+                "Gross profit": format_euros(item["gross_profit_cents"]),
+            }
+            for item in latest["products"]
+        ]
+        + [
+            {
+                "Product": "TOTAL",
+                "Demand": latest["totals"]["demand"],
+                "Units sold": latest["totals"]["units_sold"],
+                "Revenue": format_euros(latest["totals"]["revenue_cents"]),
+                "Cost of goods sold": format_euros(
+                    latest["totals"]["cost_of_goods_sold_cents"]
+                ),
+                "Gross profit": format_euros(
+                    latest["totals"]["gross_profit_cents"]
+                ),
+            }
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )
+    st.caption(
+        f"Rent: {format_euros(latest['rent_paid_cents'])} paid of "
+        f"{format_euros(latest['rent_due_cents'])} due; "
+        f"{format_euros(latest['rent_shortfall_cents'])} forgiven."
+    )
 
 
 @st.dialog("Confirm your café lease", width="small", dismissible=False)
@@ -687,10 +718,28 @@ def _show_location_setup(database: str, session: dict, player: dict) -> None:
         _confirm_location_lease(database, session, player, selected)
 
 
+def _leave_player_lobby(session_id: str, player_id: str) -> None:
+    progress = v2_storage.get_player_progress(
+        v2_storage.V2_DATABASE_PATH, session_id, player_id
+    )
+    st.session_state.pop("v2_waiting_player", None)
+    _navigate_to(_player_destination(progress))
+
+
+@st.fragment(run_every=2.5)
+def _watch_for_game_start(session_id: str, player_id: str) -> None:
+    if v2_storage.get_game_session_status(v2_storage.V2_DATABASE_PATH, session_id) != "waiting":
+        _leave_player_lobby(session_id, player_id)
+
+
 def _show_waiting_room(
     session_id: str, *, host: bool, player_id: str | None = None
 ) -> None:
     session = v2_storage.get_game_session(v2_storage.V2_DATABASE_PATH, session_id)
+    if player_id and session["status"] != "waiting" and st.session_state.get(
+        "v2_waiting_player"
+    ) == (session_id, player_id):
+        _leave_player_lobby(session_id, player_id)
     st.subheader("Waiting room" if session["status"] == "waiting" else "Game status")
     _session_summary(session)
     players = v2_storage.list_session_players(
@@ -718,10 +767,15 @@ def _show_waiting_room(
             except ValueError as error:
                 st.error(str(error))
             else:
+                if player_id:
+                    _leave_player_lobby(session_id, player_id)
                 st.rerun()
         st.caption("You can start once at least one player has joined.")
     elif session["status"] == "waiting":
-        st.info("The host has not started the game yet. Refresh to check again.")
+        st.info("The host has not started the game yet. This page will update automatically.")
+        if player_id:
+            st.session_state["v2_waiting_player"] = (session_id, player_id)
+            _watch_for_game_start(session_id, player_id)
     elif session["status"] == "active":
         st.success("The game has started.")
         if player_id:
@@ -803,18 +857,22 @@ def _host_page() -> None:
             st.rerun()
 
 
+def _show_new_player_credential() -> None:
+    credential = st.session_state.pop("v2_new_player_credential", None)
+    if credential:
+        st.warning("Save this private recovery credential. It is shown only once.")
+        st.code(credential)
+
+
 def _join_page() -> None:
     st.header("Join Game")
     player = st.session_state.get("v2_player")
     if player:
-        new_credential = st.session_state.pop("v2_new_player_credential", None)
-        if new_credential:
-            st.warning("Save this private recovery credential. It is shown only once.")
-            st.code(new_credential)
         st.write(f"You joined as **{player['nickname']}**.")
         _show_waiting_room(
             player["session_id"], host=False, player_id=player["player_id"]
         )
+        _show_new_player_credential()
         return
 
     st.caption("Enter the code shared by the host and choose a nickname.")
@@ -832,6 +890,7 @@ def _join_page() -> None:
             st.error(str(error))
         else:
             _save_player_identity(player, player["recovery_credential"])
+            st.session_state["v2_waiting_player"] = (player["session_id"], player["player_id"])
             st.session_state["v2_new_player_credential"] = player["recovery_credential"]
             st.rerun()
 
@@ -845,6 +904,7 @@ def _resume_page() -> None:
         )
         if st.button("Sign out of this player", key="v2_sign_out"):
             st.session_state.pop("v2_player", None)
+            st.session_state.pop("v2_waiting_player", None)
             st.rerun()
         return
 
@@ -868,6 +928,13 @@ def _resume_page() -> None:
             st.error(str(error))
         else:
             _save_player_identity(progress, recovery_credential)
+            status = v2_storage.get_game_session_status(
+                v2_storage.V2_DATABASE_PATH, progress["session_id"]
+            )
+            if status != "waiting":
+                st.session_state["v2_player_action_message"] = f"Resumed as {progress['nickname']}."
+                _navigate_to(_player_destination(progress))
+            st.session_state["v2_waiting_player"] = (progress["session_id"], progress["player_id"])
             st.rerun()
 
 
@@ -879,6 +946,7 @@ def _host_join_page() -> None:
         key="v2_access_flow",
     )
     if flow == "Host Game":
+        st.session_state.pop("v2_waiting_player", None)
         _host_page()
     elif flow == "Join Game":
         _join_page()
@@ -972,6 +1040,10 @@ def render() -> None:
     )
     st.title("☕ Campus Tycoon 2.0")
     st.caption("A Lisbon café game. Plan your menu, serve your customers, grow your result.")
+    next_section = st.session_state.pop("v2_next_section", None)
+    if next_section is not None:
+        st.session_state["v2_main_navigation"] = next_section
+
     page = st.selectbox(
         "Game section",
         [
@@ -987,6 +1059,7 @@ def render() -> None:
     if page == "Host / Join Game":
         _host_join_page()
         return
+    st.session_state.pop("v2_waiting_player", None)
     if page == "Leaderboard":
         _leaderboard_page()
         return

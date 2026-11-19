@@ -818,3 +818,27 @@ def test_v2_database_does_not_change_the_existing_v1_database(tmp_path):
         ).fetchall() == before_schema
         assert connection.execute("SELECT * FROM game_run").fetchall() == before_run
     assert DATABASE_PATH.name == "campus_tycoon.sqlite3"
+
+
+def test_repeated_purchase_for_same_day_and_stock_is_rejected(tmp_path):
+    database = tmp_path / "purchase-retry.sqlite3"
+    session = create_game_session(database)
+    player = join_game_session(database, session["join_code"], "Alex")
+    session_id, player_id = session["session_id"], player["player_id"]
+    start_game_session(database, session_id, session["host_credential"])
+    purchase_player_stock(
+        database, session_id, player_id, "bica", 3, expected_day=1, expected_stock=0
+    )
+    after_first = get_player_progress(database, session_id, player_id)
+    with pytest.raises(ValueError, match="day or stock changed"):
+        purchase_player_stock(
+            database, session_id, player_id, "bica", 3, expected_day=1, expected_stock=0
+        )
+    assert get_player_progress(database, session_id, player_id) == after_first
+
+    purchase_player_stock(
+        database, session_id, player_id, "bica", 3, expected_day=1, expected_stock=3
+    )
+    after_second = get_player_progress(database, session_id, player_id)
+    bica = next(product for product in after_second["products"] if product["product_key"] == "bica")
+    assert bica["quantity"] == 6
