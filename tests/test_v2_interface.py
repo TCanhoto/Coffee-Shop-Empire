@@ -160,7 +160,7 @@ def test_active_player_can_buy_set_price_and_complete_day_once(tmp_path, monkeyp
     )) == 0
     app = click(app, "Confirm Complete Day")
     assert not app.exception
-    assert any(button.label == "Complete Day 2" for button in app.button)
+    assert app.selectbox[0].value == "Dashboard"
     assert any(item.value == "Day 1 results" for item in app.subheader)
     assert any("Rent:" in item.value for item in app.caption)
 
@@ -175,6 +175,15 @@ def test_active_player_can_buy_set_price_and_complete_day_once(tmp_path, monkeyp
     assert coffee["selected_price_cents"] == 120
     assert len(history) == 1
     assert history[0]["day"] == 1
+    app = click(app, "Continue to Day 2")
+    assert app.selectbox[0].value == "Today"
+    assert any(button.label == "Complete Day 2" for button in app.button)
+    assert v2_storage.get_player_progress(
+        database, session["session_id"], player["player_id"]
+    ) == progress
+    assert v2_storage.load_player_trade_history(
+        database, session["session_id"], player["player_id"]
+    ) == history
 
 
 def test_pretrade_demand_ranges_follow_each_players_own_menu_and_location(
@@ -462,6 +471,10 @@ def test_player_can_edit_menu_and_only_active_products_have_actions(tmp_path, mo
         "pastel_de_nata",
         "brownie",
     }
+    assert app.selectbox[0].value == "Today"
+    assert any("menu was saved" in message.value for message in app.success)
+    assert progress["current_day"] == 1
+    app = navigate(app, "Café Setup")
     assert not any(item.label == "Buy Bica" for item in app.button)
     displayed_text = " ".join(str(frame.value) for frame in app.dataframe)
     assert "Category" in displayed_text
@@ -674,3 +687,102 @@ def test_independent_screen_sessions_do_not_inherit_login_or_replay_purchases(tm
     assert "v2_player" not in first.session_state
     assert "v2_player" not in second.session_state
 
+
+
+def test_host_start_routes_waiting_players_and_resume_recovers_saved_day(tmp_path, monkeypatch):
+    database = tmp_path / "lobby.sqlite3"
+    session = v2_storage.create_game_session(database)
+    other_session = v2_storage.create_game_session(database)
+    alex = v2_storage.join_game_session(database, session["join_code"], "Alex")
+    blair = v2_storage.join_game_session(database, session["join_code"], "Blair")
+    casey = v2_storage.join_game_session(database, other_session["join_code"], "Casey")
+    alex_app = resume_in_app(open_v2_app(monkeypatch, database), session, alex)
+    blair_app = resume_in_app(open_v2_app(monkeypatch, database), session, blair)
+    casey_app = resume_in_app(open_v2_app(monkeypatch, database), other_session, casey)
+    host_app = open_v2_app(monkeypatch, database)
+    host_app.text_input[0].set_value(session["join_code"])
+    host_app.text_input[1].set_value(session["host_credential"])
+    host_app = click(host_app, "Resume Host Controls")
+    click(host_app, "Start Game")
+
+    # AppTest drives a rerun explicitly. A real browser drives the timed fragment.
+    for app in (alex_app, blair_app):
+        app.run()
+        assert not app.exception
+        assert app.selectbox[0].value == "Café Setup"
+    assert casey_app.run().selectbox[0].value == "Host / Join Game"
+
+    v2_storage.select_player_location(
+        database, session["session_id"], alex["player_id"], "carcavelos_nova_sbe"
+    )
+    v2_storage.trade_player_day(database, session["session_id"], alex["player_id"], 1)
+    resumed = resume_in_app(open_v2_app(monkeypatch, database), session, alex)
+    assert resumed.selectbox[0].value == "Dashboard"
+    assert any(item.value == "Day 1 results" for item in resumed.subheader)
+    assert len(v2_storage.load_player_trade_history(
+        database, session["session_id"], alex["player_id"]
+    )) == 1
+
+
+def test_failed_menu_and_trade_keep_current_section(tmp_path, monkeypatch):
+    database = tmp_path / "rejected-actions.sqlite3"
+    session = v2_storage.create_game_session(database, trading_days=1)
+    player = v2_storage.join_game_session(database, session["join_code"], "Alex")
+    v2_storage.start_game_session(database, session["session_id"], session["host_credential"])
+    v2_storage.select_player_location(
+        database, session["session_id"], player["player_id"], "carcavelos_nova_sbe"
+    )
+    app = resume_in_app(open_v2_app(monkeypatch, database), session, player)
+    app = navigate(app, "Café Setup")
+    app.multiselect[0].set_value(["pastel_de_nata"]).run()
+    app = click(app, "Save menu")
+    assert app.selectbox[0].value == "Café Setup"
+    assert any("at least one drink" in message.value for message in app.error)
+
+    app = navigate(app, "Today")
+    app = click(app, "Complete Day 1")
+    with monkeypatch.context() as patch:
+        def reject_trade(*args, **kwargs):
+            raise ValueError("Trade failed.")
+
+        patch.setattr(v2_storage, "trade_player_day", reject_trade)
+        app = click(app, "Confirm Complete Day")
+    assert app.selectbox[0].value == "Today"
+    assert any("Trade failed." in message.value for message in app.error)
+    assert v2_storage.load_player_trade_history(
+        database, session["session_id"], player["player_id"]
+    ) == []
+
+    app = click(app, "Complete Day 1")
+    app = click(app, "Confirm Complete Day")
+    assert app.selectbox[0].value == "Dashboard"
+    assert not any(button.label.startswith("Continue to Day") for button in app.button)
+    assert click(app, "View Final Report").selectbox[0].value == "Final Report"
+
+
+def test_purchase_form_submits_only_the_selected_product(tmp_path, monkeypatch):
+    database = tmp_path / "purchase-forms.sqlite3"
+    session = v2_storage.create_game_session(database)
+    player = v2_storage.join_game_session(database, session["join_code"], "Alex")
+    v2_storage.start_game_session(database, session["session_id"], session["host_credential"])
+    v2_storage.select_player_location(
+        database, session["session_id"], player["player_id"], "carcavelos_nova_sbe"
+    )
+    app = resume_in_app(open_v2_app(monkeypatch, database), session, player)
+    before = v2_storage.get_player_progress(database, session["session_id"], player["player_id"])
+    next(item for item in app.number_input if item.label == "Units to buy (Bica)").set_value(7)
+    next(item for item in app.number_input if item.label == "Units to buy (Galão)").set_value(3)
+    app.run()
+    assert v2_storage.get_player_progress(
+        database, session["session_id"], player["player_id"]
+    ) == before
+
+    # The browser sends the form value together with the submit action.
+    next(item for item in app.number_input if item.label == "Units to buy (Galão)").set_value(3)
+    app = click(app, "Buy Galão")
+    assert not app.exception
+    after = v2_storage.get_player_progress(database, session["session_id"], player["player_id"])
+    products = {product["product_key"]: product for product in after["products"]}
+    assert products["bica"]["quantity"] == 0
+    assert products["galao"]["quantity"] == 3
+    assert before["cash_cents"] - after["cash_cents"] == 3 * products["galao"]["purchase_cost_cents"]
