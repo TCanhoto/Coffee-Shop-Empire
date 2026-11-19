@@ -123,7 +123,7 @@ def test_negative_results_one_player_and_empty_session(tmp_path):
     session, (player,) = make_session(database, names=("Solo",))
     with sqlite3.connect(database) as connection:
         connection.execute(
-            "UPDATE players SET cash_cents = 199_950 WHERE player_id = ?",
+            "UPDATE players SET cash_cents = 199950 WHERE player_id = ?",
             (player["player_id"],),
         )
 
@@ -169,7 +169,7 @@ def test_leaderboard_page_shows_negative_result_and_manual_refresh_is_read_only(
     session, (player,) = make_session(database, names=("Solo",))
     with sqlite3.connect(database) as connection:
         connection.execute(
-            "UPDATE players SET cash_cents = 199_950 WHERE player_id = ?",
+            "UPDATE players SET cash_cents = 199950 WHERE player_id = ?",
             (player["player_id"],),
         )
     monkeypatch.setattr(v2_storage, "V2_DATABASE_PATH", database)

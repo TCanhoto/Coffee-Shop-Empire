@@ -1,6 +1,7 @@
 """Integration tests for V2 rents, progression, and player end results."""
 
 import pytest
+import v2_storage
 
 from v2_storage import (
     create_game_session,
@@ -31,8 +32,9 @@ def choose_location(database, session, player, location_key="carcavelos_nova_sbe
     )
 
 
-def test_daily_revenue_pays_rent_once_without_double_deducting_cost_of_goods(tmp_path):
+def test_daily_revenue_pays_rent_once_without_double_deducting_cost_of_goods(tmp_path, monkeypatch):
     database = tmp_path / "rent.sqlite3"
+    monkeypatch.setattr(v2_storage, "_get_or_create_session_event", lambda *args: (None, None))
     session, player = active_game(database)
     choose_location(database, session, player)
     purchase_player_stock(database, session["session_id"], player["player_id"], "bica", 10)
@@ -53,8 +55,9 @@ def test_daily_revenue_pays_rent_once_without_double_deducting_cost_of_goods(tmp
     assert next(row for row in progress["products"] if row["product_key"] == "bica")["quantity"] == 0
 
 
-def test_rent_shortfall_ends_only_that_player_at_zero_cash(tmp_path):
+def test_rent_shortfall_ends_only_that_player_at_zero_cash(tmp_path, monkeypatch):
     database = tmp_path / "bankruptcy.sqlite3"
+    monkeypatch.setattr(v2_storage, "_get_or_create_session_event", lambda *args: (None, None))
     session, player = active_game(database, days=7, starting_cash="10.00")
     choose_location(database, session, player, "chiado")
     for key, price in (("bica", "1.81"), ("galao", "3.01")):
@@ -93,8 +96,9 @@ def test_rent_shortfall_ends_only_that_player_at_zero_cash(tmp_path):
             action()
 
 
-def test_seven_day_game_charges_seven_rents_and_has_final_cash_only_score(tmp_path):
+def test_seven_day_game_charges_seven_rents_and_has_final_cash_only_score(tmp_path, monkeypatch):
     database = tmp_path / "seven-days.sqlite3"
+    monkeypatch.setattr(v2_storage, "_get_or_create_session_event", lambda *args: (None, None))
     session, player = active_game(database)
     assert session["trading_days"] == 7
     assert session["starting_budget_cents"] == 200_000
@@ -126,8 +130,9 @@ def test_seven_day_game_charges_seven_rents_and_has_final_cash_only_score(tmp_pa
         )
 
 
-def test_two_players_pay_their_own_location_rent_and_bankruptcy_is_isolated(tmp_path):
+def test_two_players_pay_their_own_location_rent_and_bankruptcy_is_isolated(tmp_path, monkeypatch):
     database = tmp_path / "two-players.sqlite3"
+    monkeypatch.setattr(v2_storage, "_get_or_create_session_event", lambda *args: (None, None))
     session = create_game_session(
         database, trading_days=2, starting_budget="50.00"
     )

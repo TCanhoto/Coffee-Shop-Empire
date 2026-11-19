@@ -72,6 +72,18 @@
 - Final result equaling final cash minus starting cash, with no inventory recovery value.
 - The interface showing product-level results, totals, and rent after a completed day.
 
+## Task C3 location event test coverage
+
+`tests/test_v2_events.py`, `tests/test_v2_storage.py`, and `tests/test_v2_interface.py` cover:
+
+- All eight named positive/negative location events, location matching, and selection balance.
+- Whole-unit half-up rounding for demand visitors and per-product inventory loss.
+- Exactly one guaranteed first event; a 50/50 one-or-two event plan when another player-day is available; and one event in a single-day solo game.
+- Event assignment only on the first successful day completion, no reroll on page renders, and no event disclosure before a scheduled day completes.
+- Atomic event effects and trade persistence, duplicate/stale submission rejection, rollback on write failure, and no event replay after database reinitialization/resume.
+- Independent player and session event records, plus visible saved event outcomes on Today and Dashboard.
+- Demand/event outcomes leave the shared deterministic demand engine unchanged and do not modify prices, rent, or purchase costs.
+
 ## Step 3.1 leaderboard test coverage
 
 `tests/test_v2_leaderboard.py` covers result ranking, revenue and stable-ID

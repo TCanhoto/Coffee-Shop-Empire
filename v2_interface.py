@@ -42,6 +42,25 @@ def _session_summary(session: dict) -> None:
     st.write(f"Status: **{session['status'].title()}**")
 
 
+def _render_recorded_events(history: list[dict]) -> None:
+    """Show only outcomes saved for days the player actually completed."""
+
+    recorded = [day for day in history if day.get("event")]
+    if not recorded:
+        return
+    st.subheader("Location events")
+    for day in recorded:
+        event = day["event"]
+        with st.container(border=True):
+            label = f"Day {day['day']} event: {event['name']}"
+            if event["polarity"] == "positive":
+                st.success(label)
+            else:
+                st.warning(label)
+            st.write(event["explanation"])
+            st.caption(event["impact_summary"])
+
+
 def _show_management_dashboard(
     progress: dict, history: list[dict], total_days: int, can_trade: bool
 ) -> None:
@@ -103,6 +122,8 @@ def _show_management_dashboard(
         hide_index=True,
         width="stretch",
     )
+
+    _render_recorded_events(history)
 
     st.subheader("Daily results history")
     if not history:
@@ -362,6 +383,9 @@ def _show_player_cafe(
     action_message = st.session_state.pop("v2_player_action_message", None)
     if action_message:
         st.success(action_message)
+    trade_message = st.session_state.pop("v2_last_trade_message", None)
+    if trade_message:
+        st.success(trade_message)
     last_day = session["trading_days"]
     render_sticky_business_header(progress, last_day)
     if session["status"] == "waiting":
@@ -376,6 +400,8 @@ def _show_player_cafe(
         return
 
     st.subheader(f"☕ {progress['nickname']}'s café")
+    if section == "Today":
+        _render_recorded_events(history)
     if progress["is_bankrupt"]:
         st.error("Your café could not pay its full rent. Your game has ended.")
     elif progress["current_day"] > last_day:

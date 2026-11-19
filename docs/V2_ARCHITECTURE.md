@@ -61,6 +61,10 @@ SQLite transactions group related changes. For a purchase, V2 locks the write tr
 
 Connections turn on foreign-key checks and use a timeout for short periods when another writer holds the database. All writes use `BEGIN IMMEDIATE`, so simultaneous writers take turns before reading balances. SQLite remains suitable for the expected small local group; a much larger multi-server deployment would need a new capacity review.
 
+## Task C3 location events
+
+`v2_events.py` contains the event catalogue, random selection helpers, and pure effect calculations. The demand engine remains deterministic and unchanged. SQLite stores one planned event count per session and event assignments per player/day. On the first valid day completion, the same `BEGIN IMMEDIATE` transaction chooses one or two events, guarantees the first on the completing player/day, and assigns an optional second to a random eligible future player-day. A planned second event is not presented as historical until its player completes that day. Demand events round potential visitors to a whole number before calling the existing engine; inventory events round each product's lost stock to a whole unit. The trade result, affected inventory, event outcome, and event history are committed together, so rejected or failed trades cannot consume or replay an event. Queries for saved event history are scoped to the signed-in player.
+
 ## Recovery credential
 
 When a player joins, the storage function returns a long random recovery credential once. Only its SHA-256 hash is saved. Resume accepts the session code, normalized nickname, and credential, then compares hashes safely before returning player state. The interface shows the credential once and keeps it in the current browser session state for convenience. Public waiting-room rows contain nicknames only.

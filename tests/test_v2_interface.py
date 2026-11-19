@@ -116,6 +116,25 @@ def test_waiting_player_sees_clear_host_wait_message_and_no_trade_actions(
     assert not any(button.label.startswith("Buy ") for button in app.button)
 
 
+def test_rendering_and_navigation_do_not_assign_or_reveal_events(tmp_path, monkeypatch):
+    database = tmp_path / "event-render.sqlite3"
+    session = v2_storage.create_game_session(database)
+    player = v2_storage.join_game_session(database, session["join_code"], "Alex")
+    v2_storage.start_game_session(database, session["session_id"], session["host_credential"])
+    v2_storage.select_player_location(
+        database, session["session_id"], player["player_id"], "chiado"
+    )
+    app = resume_in_app(open_v2_app(monkeypatch, database), session, player)
+    app = navigate(app, "Today")
+    app = navigate(app, "Dashboard")
+    app = navigate(app, "Today")
+    assert not app.exception
+    assert not any("Location events" in item.value for item in app.subheader)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM session_event_plans").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM player_day_events").fetchone()[0] == 0
+
+
 def test_active_player_can_buy_set_price_and_complete_day_once(tmp_path, monkeypatch):
     database = tmp_path / "v2.sqlite3"
     session = v2_storage.create_game_session(database, trading_days=2)
@@ -175,6 +194,11 @@ def test_active_player_can_buy_set_price_and_complete_day_once(tmp_path, monkeyp
     assert coffee["selected_price_cents"] == 120
     assert len(history) == 1
     assert history[0]["day"] == 1
+    assert history[0]["event"] is not None
+    event_name = history[0]["event"]["name"]
+    assert any(
+        event_name in item.value for item in list(app.success) + list(app.warning)
+    )
     app = click(app, "Continue to Day 2")
     assert app.selectbox[0].value == "Today"
     assert any(button.label == "Complete Day 2" for button in app.button)
@@ -489,6 +513,7 @@ def test_player_can_edit_menu_and_only_active_products_have_actions(tmp_path, mo
 def test_management_dashboard_numbers_history_charts_and_player_isolation(
     tmp_path, monkeypatch
 ):
+    monkeypatch.setattr(v2_storage, "_get_or_create_session_event", lambda *args: (None, None))
     database = tmp_path / "v2.sqlite3"
     session = v2_storage.create_game_session(database, trading_days=3)
     player_a = v2_storage.join_game_session(database, session["join_code"], "Alex")

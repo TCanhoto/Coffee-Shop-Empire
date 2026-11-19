@@ -8,6 +8,7 @@ import pytest
 
 from storage import DATABASE_PATH, initialize_database
 from content import DEFAULT_MENU_KEYS, MAX_MENU_SIZE, PRODUCT_CATALOGUE
+import v2_storage
 from v2_storage import (
     authenticate_host,
     create_game_session,
@@ -543,9 +544,10 @@ def test_same_nickname_is_allowed_in_different_sessions(tmp_path):
     assert first["session_id"] != second["session_id"]
 
 
-def test_players_have_independent_cash_inventory_and_trade_history(tmp_path):
+def test_players_have_independent_cash_inventory_and_trade_history(tmp_path, monkeypatch):
     database = tmp_path / "game-v2.sqlite3"
     session = make_session(database)
+    monkeypatch.setattr(v2_storage, "_get_or_create_session_event", lambda *args: (None, None))
     first = join(database, session, "First")
     second = join(database, session, "Second")
     start_game_session(database, session["session_id"], session["host_credential"])
@@ -572,7 +574,9 @@ def test_players_have_independent_cash_inventory_and_trade_history(tmp_path):
     assert second_before_trade["cash_cents"] == 200_000
     assert second_coffee_before_trade["quantity"] == 0
 
-    trade_player_day(database, session["session_id"], first["player_id"], expected_day=1)
+    first_trade = trade_player_day(
+        database, session["session_id"], first["player_id"], expected_day=1
+    )
 
     first_progress = get_player_progress(
         database, session["session_id"], first["player_id"]
@@ -583,7 +587,11 @@ def test_players_have_independent_cash_inventory_and_trade_history(tmp_path):
     first_coffee = next(p for p in first_progress["products"] if p["product_key"] == "bica")
     second_coffee = next(p for p in second_progress["products"] if p["product_key"] == "bica")
 
-    assert first_progress["cash_cents"] == 197_700
+    assert first_progress["cash_cents"] == (
+        first_before_trade["cash_cents"]
+        + first_trade["totals"]["revenue_cents"]
+        - first_trade["rent_paid_cents"]
+    )
     assert first_progress["current_day"] == 2
     assert first_coffee["quantity"] == 0
     assert second_progress["cash_cents"] == 200_000
@@ -634,9 +642,10 @@ def test_player_action_cannot_target_another_session_player(tmp_path):
     assert after == before
 
 
-def test_progress_and_history_survive_reopening_and_recovery_is_verified(tmp_path):
+def test_progress_and_history_survive_reopening_and_recovery_is_verified(tmp_path, monkeypatch):
     database = tmp_path / "game-v2.sqlite3"
     session = make_session(database)
+    monkeypatch.setattr(v2_storage, "_get_or_create_session_event", lambda *args: (None, None))
     player = join(database, session, "Alex")
     start_game_session(database, session["session_id"], session["host_credential"])
     confirm_location(database, session, player)
@@ -667,9 +676,10 @@ def test_progress_and_history_survive_reopening_and_recovery_is_verified(tmp_pat
         resume_player(database, session["session_id"], player["player_id"], "wrong-token")
 
 
-def test_approved_demand_example_is_traded_and_customer_counts_are_saved(tmp_path):
+def test_approved_demand_example_is_traded_and_customer_counts_are_saved(tmp_path, monkeypatch):
     database = tmp_path / "game-v2.sqlite3"
     session = make_session(database)
+    monkeypatch.setattr(v2_storage, "_get_or_create_session_event", lambda *args: (None, None))
     player = join(database, session, "Alex")
     start_game_session(database, session["session_id"], session["host_credential"])
     confirm_location(database, session, player, "carcavelos_nova_sbe")
@@ -780,6 +790,17 @@ def test_repeated_stale_day_submission_does_not_complete_the_next_day(tmp_path):
     history = load_player_trade_history(database, session["session_id"], player["player_id"])
     assert progress["current_day"] == 2
     assert [item["day"] for item in history] == [1]
+    with sqlite3.connect(database) as connection:
+        event_rows = connection.execute(
+            "SELECT status FROM player_day_events WHERE session_id = ? AND player_id = ?",
+            (session["session_id"], player["player_id"]),
+        ).fetchall()
+        assert connection.execute(
+            "SELECT COUNT(*) FROM session_event_plans WHERE session_id = ?",
+            (session["session_id"],),
+        ).fetchone()[0] == 1
+    assert sum(status == "occurred" for (status,) in event_rows) == 1
+    assert len(event_rows) in {1, 2}
 
 
 def test_two_simultaneous_day_submissions_commit_exactly_one_result(tmp_path):
@@ -812,6 +833,17 @@ def test_two_simultaneous_day_submissions_commit_exactly_one_result(tmp_path):
     history = load_player_trade_history(database, session["session_id"], player["player_id"])
     assert progress["current_day"] == 2
     assert [item["day"] for item in history] == [1]
+    with sqlite3.connect(database) as connection:
+        event_rows = connection.execute(
+            "SELECT status FROM player_day_events WHERE session_id = ? AND player_id = ?",
+            (session["session_id"], player["player_id"]),
+        ).fetchall()
+        assert connection.execute(
+            "SELECT COUNT(*) FROM session_event_plans WHERE session_id = ?",
+            (session["session_id"],),
+        ).fetchone()[0] == 1
+    assert sum(status == "occurred" for (status,) in event_rows) == 1
+    assert len(event_rows) in {1, 2}
 
 
 def test_invalid_waiting_and_price_actions_leave_player_data_unchanged(tmp_path):
