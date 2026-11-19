@@ -65,7 +65,7 @@ The Leaderboard page shows only players from the current host/player session. It
 
 ## Step 3.2 delivered boundary — management dashboard
 
-Each player sees a dashboard built from their own current progress and saved daily history. It shows available cash, day progress, accumulated revenue, current game result (current cash minus starting cash), customers served, and inventory. Charts show completed-day revenue, closing cash from Day 0 through completed days, and units sold by product. Best-selling products and chronological daily results are listed. Empty histories show guidance and current inventory without empty charts. All dashboard data is retrospective/current; there are no forecasts or What-if tools.
+Each player sees a dashboard built from their own current progress and saved daily history. It shows available cash, day progress, accumulated revenue, current game result (current cash minus starting cash), customers served, and inventory. Charts show completed-day revenue, closing cash from Day 0 through completed days, and units sold by product. Best-selling products and chronological daily results are listed. Empty histories show guidance and current inventory without empty charts. Dashboard data is retrospective/current. The pre-trading Today screen can show broad demand estimate ranges; it does not forecast profit or provide What-if tools.
 
 ## Step 3.3 delivered boundary — final performance report
 

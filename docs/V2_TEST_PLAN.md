@@ -55,6 +55,7 @@
 - The 12 approved Step 2.2 catalogue records and all five personas.
 - A complete affinity entry for every product/persona pair using only scores 0, 1, or 3.
 - Per-player menus surviving resume, independent menus, the 5-product limit in validation and SQLite, duplicate rejection, legacy menu preservation/reduction, and the requirement for at least one drink.
+- Pre-trading demand display ranges: positive and zero baselines, outward rounding, broad bounds that hide the exact baseline, signed profit intervals, and independent player estimates; completed-day dashboard results remain exact.
 - Purchases and prices restricted to active menu products; invalid prices leave saved state unchanged.
 - Removed menu products retaining unsold stock, and later menu changes leaving completed trading history unchanged.
 - AppTest showing category and reference price details and actions only for current menu products.

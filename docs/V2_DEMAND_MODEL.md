@@ -1,6 +1,12 @@
 # Campus Tycoon V2 deterministic demand model
 
-**Status: approved and implemented.** The group approved this model before implementation. Pure demand calculations live in `demand_engine.py`; `business_logic.py` separately calculates cash and sale results, and `v2_storage.py` applies them transactionally. `v2_interface.py` explains the rules and previews menu demand. Daily customer counts are saved with the trading-day result. Rent remains informational and is not deducted by this demand-model step.
+**Status: approved and implemented.** The group approved this model before implementation. Pure demand calculations live in `demand_engine.py`; `business_logic.py` separately calculates cash and sale results, and `v2_storage.py` applies them transactionally. The `Today` screen uses the unchanged deterministic result as an internal baseline and shows only a rounded demand range before trading. Exact daily customer and product results are saved and shown in history after the day completes. No expected-profit number is shown before trading because final purchases, sales, and rent settlement determine the realized result.
+
+### Pre-trading estimate display
+
+`estimate_ranges.py` converts a non-negative internal demand baseline into broad displayed bounds: the lower endpoint is rounded down from 55% of the baseline and the upper endpoint rounded up from 160%. Endpoints round outward in steps near one quarter of the baseline, with a five-unit minimum step; zero demand displays as 0–5. This asymmetric spread and coarse outward rounding mean multiple exact baselines can produce the same displayed interval. The range is a planning estimate, not a guaranteed minimum or maximum. The helper does not modify demand or saved game data.
+
+The module also provides a pure interval conversion for signed gross-profit baselines in integer cents, using the same asymmetric spread and a minimum €5 rounding step. It is not currently used for a pre-trading profit display. Any future screen must define its profit baseline consistently: gross profit is revenue minus cost of goods sold; rent is a separate game cost and must be included if the screen claims to estimate a net result. Current UI explains that profit is available after purchases and trading; the Dashboard keeps exact historical values.
 
 ## 1. Scope and inputs
 

@@ -6,6 +6,8 @@ import sqlite3
 from streamlit.testing.v1 import AppTest
 
 from business_logic import format_euros
+from demand_engine import calculate_v2_demand
+from estimate_ranges import demand_estimate_range
 import v2_storage
 
 
@@ -131,6 +133,19 @@ def test_active_player_can_buy_set_price_and_complete_day_once(tmp_path, monkeyp
     assert not app.exception
     app = navigate(app, "Today")
     assert any(button.label == "Complete Day 1" for button in app.button)
+    range_text = [item.value for item in app.markdown if "Estimated demand range" in item.value]
+    assert range_text
+    assert all("units/day" in item and "planning range" in item for item in range_text)
+    assert not any("Estimated menu demand at this price" in item.value for item in app.markdown)
+    assert any("Profit is not forecast" in item.value for item in app.caption)
+    preview_progress = v2_storage.get_player_progress(
+        database, session["session_id"], player["player_id"]
+    )
+    preview_products = [item for item in preview_progress["products"] if item["is_active"]]
+    exact_preview = calculate_v2_demand(
+        preview_progress["location"], preview_products
+    )["products"]["bica"]["demand"]
+    assert f"{exact_preview} units/day" not in " ".join(range_text)
     app = click(app, "Buy Bica")
     assert not app.exception
     price = next(field for field in app.text_input if field.label == "Selling price for Bica (€)")
@@ -160,6 +175,55 @@ def test_active_player_can_buy_set_price_and_complete_day_once(tmp_path, monkeyp
     assert coffee["selected_price_cents"] == 120
     assert len(history) == 1
     assert history[0]["day"] == 1
+
+
+def test_pretrade_demand_ranges_follow_each_players_own_menu_and_location(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "player-range-isolation.sqlite3"
+    session = v2_storage.create_game_session(database)
+    alex = v2_storage.join_game_session(database, session["join_code"], "Alex")
+    blair = v2_storage.join_game_session(database, session["join_code"], "Blair")
+    v2_storage.start_game_session(database, session["session_id"], session["host_credential"])
+    v2_storage.select_player_location(
+        database, session["session_id"], alex["player_id"], "carcavelos_nova_sbe"
+    )
+    v2_storage.select_player_location(
+        database, session["session_id"], blair["player_id"], "chiado"
+    )
+    v2_storage.set_player_menu(
+        database, session["session_id"], alex["player_id"], ["bica", "pastel_de_nata"],
+        expected_day=1,
+    )
+    v2_storage.set_player_menu(
+        database, session["session_id"], blair["player_id"],
+        ["fresh_orange_juice", "granola_bowl"], expected_day=1,
+    )
+
+    shown_ranges = []
+    for player in (alex, blair):
+        app = open_v2_app(monkeypatch, database)
+        app = resume_in_app(app, session, player)
+        app = navigate(app, "Today")
+        assert not app.exception
+        shown_ranges.append(
+            [item.value for item in app.markdown if "Estimated demand range" in item.value]
+        )
+
+    assert shown_ranges[0] and shown_ranges[1]
+    assert shown_ranges[0] != shown_ranges[1]
+
+    alex_progress = v2_storage.get_player_progress(
+        database, session["session_id"], alex["player_id"]
+    )
+    alex_products = [item for item in alex_progress["products"] if item["is_active"]]
+    alex_demand = calculate_v2_demand(alex_progress["location"], alex_products)
+    alex_key = alex_products[0]["product_key"]
+    alex_bounds = demand_estimate_range(alex_demand["products"][alex_key]["demand"])
+    assert any(
+        f"**{alex_bounds[0]:,}–{alex_bounds[1]:,} units/day**" in message
+        for message in shown_ranges[0]
+    )
 
 
 def test_canceling_day_confirmation_does_not_trade_or_advance(tmp_path, monkeypatch):
@@ -386,7 +450,7 @@ def test_player_can_edit_menu_and_only_active_products_have_actions(tmp_path, mo
     assert any("5 of 5 products selected" in item.value for item in app.caption)
     assert any("Maximum reached" in item.value for item in app.info)
     app = click(app, "Save menu")
-    assert any("3 of 5 products selected" in item.value for item in app.caption)
+    assert any("5 of 5 products selected" in item.value for item in app.caption)
 
     progress = v2_storage.get_player_progress(
         database, session["session_id"], player["player_id"]
