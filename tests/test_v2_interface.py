@@ -798,19 +798,58 @@ def test_purchase_form_submits_only_the_selected_product(tmp_path, monkeypatch):
     )
     app = resume_in_app(open_v2_app(monkeypatch, database), session, player)
     before = v2_storage.get_player_progress(database, session["session_id"], player["player_id"])
-    next(item for item in app.number_input if item.label == "Units to buy (Bica)").set_value(7)
-    next(item for item in app.number_input if item.label == "Units to buy (Galão)").set_value(3)
-    app.run()
-    assert v2_storage.get_player_progress(
-        database, session["session_id"], player["player_id"]
-    ) == before
+    pending_quantities = (
+        ("bica", "Units to buy (Bica)", 7),
+        ("galao", "Units to buy (Galão)", 3),
+        ("pastel_de_nata", "Units to buy (Pastel de nata)", 4),
+    )
+    quantity_keys = {}
+    for product_key, label, quantity in pending_quantities:
+        field = next(item for item in app.number_input if item.label == label)
+        quantity_keys[product_key] = field.key
+        assert product_key in field.key
+        field.set_value(quantity)
+        app = app.run()
+        assert not app.exception
+        refreshed_field = next(item for item in app.number_input if item.label == label)
+        assert refreshed_field.key == quantity_keys[product_key]
+        assert refreshed_field.value == quantity
+        assert v2_storage.get_player_progress(
+            database, session["session_id"], player["player_id"]
+        ) == before
 
-    # The browser sends the form value together with the submit action.
-    next(item for item in app.number_input if item.label == "Units to buy (Galão)").set_value(3)
+    # Repeated reruns must preserve the separate, unsubmitted quantities.
+    for _ in range(2):
+        app = app.run()
+        assert not app.exception
+        for product_key, label, quantity in pending_quantities:
+            field = next(item for item in app.number_input if item.label == label)
+            assert field.key == quantity_keys[product_key]
+            assert field.value == quantity
+        assert v2_storage.get_player_progress(
+            database, session["session_id"], player["player_id"]
+        ) == before
+
     app = click(app, "Buy Galão")
     assert not app.exception
     after = v2_storage.get_player_progress(database, session["session_id"], player["player_id"])
     products = {product["product_key"]: product for product in after["products"]}
     assert products["bica"]["quantity"] == 0
     assert products["galao"]["quantity"] == 3
+    assert products["pastel_de_nata"]["quantity"] == 0
     assert before["cash_cents"] - after["cash_cents"] == 3 * products["galao"]["purchase_cost_cents"]
+
+    app = click(app, "Buy Pastel de nata")
+    assert not app.exception
+    final_progress = v2_storage.get_player_progress(
+        database, session["session_id"], player["player_id"]
+    )
+    final_products = {
+        product["product_key"]: product for product in final_progress["products"]
+    }
+    assert final_products["bica"]["quantity"] == 0
+    assert final_products["galao"]["quantity"] == 3
+    assert final_products["pastel_de_nata"]["quantity"] == 4
+    assert after["cash_cents"] - final_progress["cash_cents"] == (
+        4 * final_products["pastel_de_nata"]["purchase_cost_cents"]
+    )

@@ -939,3 +939,49 @@ def test_repeated_purchase_for_same_day_and_stock_is_rejected(tmp_path):
     after_second = get_player_progress(database, session_id, player_id)
     bica = next(product for product in after_second["products"] if product["product_key"] == "bica")
     assert bica["quantity"] == 6
+
+
+def test_rapid_duplicate_purchase_submissions_commit_only_once(tmp_path):
+    database = tmp_path / "rapid-purchase-retry.sqlite3"
+    session = create_game_session(database)
+    player = join_game_session(database, session["join_code"], "Alex")
+    session_id, player_id = session["session_id"], player["player_id"]
+    start_game_session(database, session_id, session["host_credential"])
+    before = get_player_progress(database, session_id, player_id)
+    bica_before = next(
+        item for item in before["products"] if item["product_key"] == "bica"
+    )
+    barrier = Barrier(2)
+
+    def submit_same_purchase():
+        barrier.wait()
+        return purchase_player_stock(
+            database,
+            session_id,
+            player_id,
+            "bica",
+            5,
+            expected_day=1,
+            expected_stock=0,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(submit_same_purchase) for _ in range(2)]
+    outcomes = []
+    for future in futures:
+        try:
+            outcomes.append(("success", future.result()))
+        except ValueError as error:
+            outcomes.append(("rejected", str(error)))
+
+    after = get_player_progress(database, session_id, player_id)
+    bica_after = next(
+        item for item in after["products"] if item["product_key"] == "bica"
+    )
+    assert [outcome for outcome, _ in outcomes].count("success") == 1
+    assert [outcome for outcome, _ in outcomes].count("rejected") == 1
+    assert any("day or stock changed" in value for outcome, value in outcomes if outcome == "rejected")
+    assert bica_after["quantity"] == 5
+    assert after["cash_cents"] == (
+        before["cash_cents"] - 5 * bica_before["purchase_cost_cents"]
+    )
