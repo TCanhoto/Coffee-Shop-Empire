@@ -782,9 +782,13 @@ def _show_waiting_room(
     session_id: str, *, host: bool, player_id: str | None = None
 ) -> None:
     session = v2_storage.get_game_session(v2_storage.V2_DATABASE_PATH, session_id)
-    if player_id and session["status"] != "waiting" and st.session_state.get(
-        "v2_waiting_player"
-    ) == (session_id, player_id):
+    is_waiting_player = st.session_state.get("v2_waiting_player") == (
+        session_id,
+        player_id,
+    )
+    if player_id and session["status"] != "waiting" and (
+        not host or is_waiting_player
+    ):
         _leave_player_lobby(session_id, player_id)
     st.subheader("Waiting room" if session["status"] == "waiting" else "Game status")
     _session_summary(session)

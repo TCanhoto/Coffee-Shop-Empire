@@ -732,6 +732,9 @@ def test_host_start_routes_waiting_players_and_resume_recovers_saved_day(tmp_pat
 
     # AppTest drives a rerun explicitly. A real browser drives the timed fragment.
     for app in (alex_app, blair_app):
+        # The active game status must recover navigation even if an app restart
+        # cleared the temporary waiting-room marker from browser session state.
+        del app.session_state["v2_waiting_player"]
         app.run()
         assert not app.exception
         assert app.selectbox[0].value == "Café Setup"
