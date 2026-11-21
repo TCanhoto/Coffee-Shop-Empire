@@ -369,6 +369,40 @@ def _show_menu_setup(
         )
 
 
+def _submit_purchase(
+    database: str,
+    session_id: str,
+    player_id: str,
+    product: dict,
+    day: int,
+    quantity_key: str,
+) -> None:
+    # Streamlit receives the form values before invoking this callback. Commit
+    # before rendering so the header and cards all use the updated snapshot.
+    quantity = st.session_state[quantity_key]
+    try:
+        total = v2_storage.purchase_player_stock(
+            database,
+            session_id,
+            player_id,
+            product["product_key"],
+            quantity,
+            expected_day=day,
+            expected_stock=product["quantity"],
+        )
+    except ValueError as error:
+        feedback = (str(error), "⚠️")
+    except sqlite3.Error:
+        feedback = ("The purchase could not be saved. Please try again.", "⚠️")
+    else:
+        st.session_state[quantity_key] = 1
+        feedback = (
+            f"Bought {quantity} {product['name'].lower()} unit(s) for {format_euros(total)}.",
+            "✅",
+        )
+    st.session_state["v2_purchase_feedback"] = feedback
+
+
 def _show_player_cafe(
     session: dict, player: dict, section: str = "Today"
 ) -> None:
@@ -381,10 +415,10 @@ def _show_player_cafe(
     )
     _show_new_player_credential()
     action_message = st.session_state.pop("v2_player_action_message", None)
-    if action_message:
+    if action_message and section != "Today":
         st.success(action_message)
     trade_message = st.session_state.pop("v2_last_trade_message", None)
-    if trade_message:
+    if trade_message and section != "Today":
         st.success(trade_message)
     last_day = session["trading_days"]
     render_sticky_business_header(progress, last_day)
@@ -476,7 +510,8 @@ def _show_player_cafe(
         if not product["is_active"]:
             continue
         key = product["product_key"]
-        with st.container(border=True):
+        card_key = f"v2_product_{player['player_id']}_{key}"
+        with st.container(border=True, key=card_key):
             icon = "🥤" if product.get("is_drink") else "🥐"
             st.markdown(f"### {icon} {product['name']}")
             st.write(
@@ -541,38 +576,25 @@ def _show_player_cafe(
                         f"{product['name']} selling price saved as {format_euros(saved)}."
                     )
                     st.rerun()
-            # A successful purchase changes stock and invalidates the old form.
             day = progress["current_day"]
-            stock = product["quantity"]
-            form_key = f"v2_purchase_{player['player_id']}_{key}_{day}_{stock}"
+            form_key = f"{card_key}_purchase"
+            quantity_key = f"{form_key}_quantity"
             with st.form(form_key, enter_to_submit=False, border=False):
-                quantity = st.number_input(
+                st.number_input(
                     f"Units to buy ({product['name']})",
                     min_value=1,
                     value=1,
                     step=1,
-                    key=f"{form_key}_quantity",
+                    key=quantity_key,
                 )
-                buy = st.form_submit_button(f"Buy {product['name']}")
-            if buy:
-                try:
-                    total = v2_storage.purchase_player_stock(
-                        database,
-                        session["session_id"],
-                        player["player_id"],
-                        key,
-                        int(quantity),
-                        expected_day=day,
-                        expected_stock=stock,
-                    )
-                except ValueError as error:
-                    st.error(str(error))
-                else:
-                    st.session_state["v2_player_action_message"] = (
-                        f"Bought {int(quantity)} {product['name'].lower()} unit(s) "
-                        f"for {format_euros(total)}."
-                    )
-                    st.rerun()
+                # Only the submit ID expires after a purchase. A pending
+                # click retains its original product and stock/day snapshot.
+                st.form_submit_button(
+                    f"Buy {product['name']}",
+                    key=f"{form_key}_submit_{day}_{product['quantity']}",
+                    on_click=_submit_purchase,
+                    args=(database, session["session_id"], player["player_id"], product, day, quantity_key),
+                )
 
     off_menu_stock = [
         product
@@ -648,6 +670,14 @@ def _show_player_cafe(
         ):
             st.session_state.pop(confirm_key, None)
             st.rerun()
+
+    if action_message:
+        st.toast(action_message, icon="✅")
+    if trade_message:
+        st.toast(trade_message, icon="✅")
+    if feedback := st.session_state.pop("v2_purchase_feedback", None):
+        message, icon = feedback
+        st.toast(message, icon=icon)
 
     if history:
         _show_day_results(history[-1])
@@ -764,10 +794,14 @@ def _show_location_setup(database: str, session: dict, player: dict) -> None:
         _confirm_location_lease(database, session, player, selected)
 
 
-def _leave_player_lobby(session_id: str, player_id: str) -> None:
+def _leave_player_lobby(
+    session_id: str, player_id: str, *, only_if_lease_missing: bool = False
+) -> None:
     progress = v2_storage.get_player_progress(
         v2_storage.V2_DATABASE_PATH, session_id, player_id
     )
+    if only_if_lease_missing and progress["location"] is not None:
+        return
     st.session_state.pop("v2_waiting_player", None)
     _navigate_to(_player_destination(progress))
 
@@ -786,10 +820,8 @@ def _show_waiting_room(
         session_id,
         player_id,
     )
-    if player_id and session["status"] != "waiting" and (
-        not host or is_waiting_player
-    ):
-        _leave_player_lobby(session_id, player_id)
+    if player_id and session["status"] != "waiting" and (not host or is_waiting_player):
+        _leave_player_lobby(session_id, player_id, only_if_lease_missing=not is_waiting_player)
     st.subheader("Waiting room" if session["status"] == "waiting" else "Game status")
     _session_summary(session)
     players = v2_storage.list_session_players(

@@ -33,7 +33,7 @@ def navigate(app, section):
 
 
 def choose_access_flow(app, action):
-    app.radio[0].set_value(action)
+    next(radio for radio in app.radio if action in radio.options).set_value(action)
     return app.run()
 
 
@@ -483,7 +483,6 @@ def test_player_can_edit_menu_and_only_active_products_have_actions(tmp_path, mo
     assert any("5 of 5 products selected" in item.value for item in app.caption)
     assert any("Maximum reached" in item.value for item in app.info)
     app = click(app, "Save menu")
-    assert any("5 of 5 products selected" in item.value for item in app.caption)
 
     progress = v2_storage.get_player_progress(
         database, session["session_id"], player["player_id"]
@@ -496,9 +495,10 @@ def test_player_can_edit_menu_and_only_active_products_have_actions(tmp_path, mo
         "brownie",
     }
     assert app.selectbox[0].value == "Today"
-    assert any("menu was saved" in message.value for message in app.success)
+    assert any("menu was saved" in toast.proto.body for toast in app.get("toast"))
     assert progress["current_day"] == 1
     app = navigate(app, "Café Setup")
+    assert any("5 of 5 products selected" in item.value for item in app.caption)
     assert not any(item.label == "Buy Bica" for item in app.button)
     displayed_text = " ".join(str(frame.value) for frame in app.dataframe)
     assert "Category" in displayed_text
@@ -809,27 +809,21 @@ def test_purchase_form_submits_only_the_selected_product(tmp_path, monkeypatch):
         quantity_keys[product_key] = field.key
         assert product_key in field.key
         field.set_value(quantity)
-        app = app.run()
-        assert not app.exception
-        refreshed_field = next(item for item in app.number_input if item.label == label)
-        assert refreshed_field.key == quantity_keys[product_key]
-        assert refreshed_field.value == quantity
-        assert v2_storage.get_player_progress(
-            database, session["session_id"], player["player_id"]
-        ) == before
+        assert field.value == quantity
 
-    # Repeated reruns must preserve the separate, unsubmitted quantities.
+    # Unsubmitted form edits belong to the browser. AppTest's unrelated reruns
+    # do not send those values, but must preserve form identity and saved state.
     for _ in range(2):
         app = app.run()
         assert not app.exception
-        for product_key, label, quantity in pending_quantities:
+        for product_key, label, _ in pending_quantities:
             field = next(item for item in app.number_input if item.label == label)
             assert field.key == quantity_keys[product_key]
-            assert field.value == quantity
         assert v2_storage.get_player_progress(
             database, session["session_id"], player["player_id"]
         ) == before
 
+    app.number_input(key=quantity_keys["galao"]).set_value(3)
     app = click(app, "Buy Galão")
     assert not app.exception
     after = v2_storage.get_player_progress(database, session["session_id"], player["player_id"])
@@ -839,6 +833,7 @@ def test_purchase_form_submits_only_the_selected_product(tmp_path, monkeypatch):
     assert products["pastel_de_nata"]["quantity"] == 0
     assert before["cash_cents"] - after["cash_cents"] == 3 * products["galao"]["purchase_cost_cents"]
 
+    app.number_input(key=quantity_keys["pastel_de_nata"]).set_value(4)
     app = click(app, "Buy Pastel de nata")
     assert not app.exception
     final_progress = v2_storage.get_player_progress(
@@ -853,3 +848,56 @@ def test_purchase_form_submits_only_the_selected_product(tmp_path, monkeypatch):
     assert after["cash_cents"] - final_progress["cash_cents"] == (
         4 * final_products["pastel_de_nata"]["purchase_cost_cents"]
     )
+
+
+def test_repeated_bica_purchases_keep_card_order_and_quantity_keys(tmp_path, monkeypatch):
+    database = tmp_path / "repeated-bica.sqlite3"
+    session = v2_storage.create_game_session(database)
+    session_id = session["session_id"]
+    player = v2_storage.join_game_session(database, session["join_code"], "Alex")
+    player_id = player["player_id"]
+    v2_storage.start_game_session(database, session_id, session["host_credential"])
+    v2_storage.select_player_location(database, session_id, player_id, "carcavelos_nova_sbe")
+    v2_storage.set_player_menu(
+        database, session_id, player_id, ["bica", "brownie", "galao"], expected_day=1
+    )
+    app = resume_in_app(open_v2_app(monkeypatch, database), session, player)
+    before = v2_storage.get_player_progress(database, session_id, player_id)
+
+    def quantity_fields():
+        return [(field.label, field.key) for field in app.number_input]
+
+    initial_fields = quantity_fields()
+    assert [label for label, _ in initial_fields] == [
+        "Units to buy (Bica)", "Units to buy (Brownie)", "Units to buy (Galão)"
+    ]
+    initial_buttons = {button.label: button.key for button in app.button if button.label.startswith("Buy ")}
+    for quantity in (2, 1, 3):
+        app.number_input(key=initial_fields[0][1]).set_value(quantity)
+        app = click(app, "Buy Bica")
+        assert not app.exception
+        assert quantity_fields() == initial_fields
+        buttons = {button.label: button.key for button in app.button if button.label.startswith("Buy ")}
+        assert list(buttons) == list(initial_buttons)
+        assert buttons["Buy Bica"] != initial_buttons["Buy Bica"]
+        assert buttons["Buy Brownie"] == initial_buttons["Buy Brownie"]
+        assert buttons["Buy Galão"] == initial_buttons["Buy Galão"]
+        assert app.number_input(key=initial_fields[0][1]).value == 1
+        assert not any("Bought" in message.value for message in app.success)
+
+    after = v2_storage.get_player_progress(database, session_id, player_id)
+    assert after["cash_cents"] == before["cash_cents"] - 120
+    assert after["current_day"] == before["current_day"]
+    for product_before, product_after in zip(before["products"], after["products"], strict=True):
+        expected = dict(product_before)
+        if expected["product_key"] == "bica":
+            expected["quantity"] += 6
+        assert product_after == expected
+    assert v2_storage.load_player_trade_history(database, session_id, player_id) == []
+
+    app.number_input(key=initial_fields[0][1]).set_value(100_000)
+    app = click(app, "Buy Bica")
+    assert not app.exception
+    assert any("afford" in toast.proto.body for toast in app.get("toast"))
+    assert quantity_fields() == initial_fields
+    assert v2_storage.get_player_progress(database, session_id, player_id) == after
