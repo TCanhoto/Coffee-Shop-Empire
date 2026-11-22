@@ -92,3 +92,11 @@ The signed-in player's dashboard uses their own progress and trade-history queri
 ## Scope limits
 
 Shared host-driven daily resolution remains out of scope. Each player's daily trade uses the deterministic V2 demand engine independently.
+
+## Shared Single Player and Multiplayer modes
+
+The current V1 and V2 version-selector options now share this player-game architecture. `app.py` delegates both choices to `v2_interface.render`; the mode parameter selects only the entry, identity, navigation and leaderboard behavior. Both modes use the same player café screens, `v2_storage.py` operations, demand engine, financial logic, events, and report summarizer.
+
+Single Player creates a unique `game_sessions` row with `mode='single_player'`, active status, and exactly one player plus that player's initial inventory and menu, all atomically. It skips host credentials, joining, and the waiting state. A separate database trigger prevents later insertion of another player into a solo session. Solo resume calls the same credential validation using an explicit single-player mode check.
+
+The additive `game_sessions.mode` column defaults pre-existing sessions to `multiplayer`. Existing V2 saves therefore keep their previous behavior. The legacy V1 singleton database and `storage.py` module remain intact but are no longer the selected gameplay interface. No automatic V1 save conversion is attempted because its catalogue and scoring differ.

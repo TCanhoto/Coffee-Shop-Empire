@@ -22,9 +22,26 @@ def _save_player_identity(progress: dict, recovery_credential: str) -> None:
     }
 
 
-def _navigate_to(section: str) -> None:
+def _navigation_keys(mode: str) -> tuple[str, str]:
+    if mode == "single_player":
+        return "solo_next_section", "solo_main_navigation"
+    return "v2_next_section", "v2_main_navigation"
+
+
+def _state_prefix(mode: str) -> str:
+    return "solo" if mode == "single_player" else "v2"
+
+
+def _remember_navigation_choice(widget_key: str, saved_key: str) -> None:
+    section = st.session_state.get(widget_key)
+    if section:
+        st.session_state[saved_key] = section
+
+
+def _navigate_to(section: str, *, mode: str = "multiplayer") -> None:
     # The navigation widget already exists in this run. Apply the new choice on rerun.
-    st.session_state["v2_next_section"] = section
+    next_key, _ = _navigation_keys(mode)
+    st.session_state[next_key] = section
     st.rerun()
 
 
@@ -59,8 +76,13 @@ def _player_destination(progress: dict) -> str:
     return "Today"
 
 
-def _available_navigation_sections() -> list[str]:
-    """Return sections available to this browser's current V2 identity."""
+def _available_navigation_sections(mode: str) -> list[str]:
+    """Return only the sections available to the selected game mode."""
+
+    if mode == "single_player":
+        if st.session_state.get("solo_player"):
+            return ["Solo Game", "Café Setup", "Today", "Dashboard", "Final Report"]
+        return ["Solo Game"]
 
     sections = ["Host / Join Game"]
     player = st.session_state.get("v2_player")
@@ -157,7 +179,12 @@ def _show_day_three_event_popup(
 
 
 def _show_management_dashboard(
-    progress: dict, history: list[dict], total_days: int, can_trade: bool
+    progress: dict,
+    history: list[dict],
+    total_days: int,
+    can_trade: bool,
+    *,
+    game_mode: str = "multiplayer",
 ) -> None:
     """Render current player metrics and charts from saved results only."""
 
@@ -201,9 +228,9 @@ def _show_management_dashboard(
         _show_day_results(history[-1])
         if can_trade:
             if st.button(f"Continue to Day {progress['current_day']}", type="primary"):
-                _navigate_to("Today")
+                _navigate_to("Today", mode=game_mode)
         elif st.button("View Final Report", type="primary"):
-            _navigate_to("Final Report")
+            _navigate_to("Final Report", mode=game_mode)
 
     st.subheader("Current inventory")
     st.table(
@@ -374,12 +401,16 @@ def _show_management_dashboard(
     )
 
 
-def _show_final_performance_report(report: dict) -> None:
+def _show_final_performance_report(
+    report: dict, *, game_mode: str = "multiplayer"
+) -> None:
     """Display a finished player's saved-data report and evidence-based advice."""
 
     st.subheader("Final Performance Report")
     st.metric("Final game result", format_euros(report["final_game_result_cents"]))
-    if report["ranking_is_final"]:
+    if game_mode == "single_player":
+        st.caption("Personal result for your solo café; there are no competing players in this game.")
+    elif report["ranking_is_final"]:
         st.metric("Final ranking", f"#{report['ranking_position']}")
     else:
         st.metric("Provisional ranking", f"#{report['ranking_position']}")
@@ -440,7 +471,13 @@ def _show_final_performance_report(report: dict) -> None:
 
 
 def _show_menu_setup(
-    database: str, session: dict, player: dict, progress: dict, can_trade: bool
+    database: str,
+    session: dict,
+    player: dict,
+    progress: dict,
+    can_trade: bool,
+    *,
+    game_mode: str = "multiplayer",
 ) -> None:
     menu_products = [
         product for product in progress["products"] if product["category"] != "Legacy"
@@ -512,8 +549,8 @@ def _show_menu_setup(
         except sqlite3.Error:
             st.error("The menu could not be saved. Please try again.")
         else:
-            st.session_state["v2_player_action_message"] = "Your café menu was saved."
-            _navigate_to("Today")
+            st.session_state[f"{_state_prefix(game_mode)}_player_action_message"] = "Your café menu was saved."
+            _navigate_to("Today", mode=game_mode)
 
     if progress["location"]:
         st.subheader("Signed location")
@@ -533,6 +570,7 @@ def _submit_purchase(
     product: dict,
     day: int,
     quantity_key: str,
+    game_mode: str = "multiplayer",
 ) -> None:
     # Streamlit receives the form values before invoking this callback. Commit
     # before rendering so the header and cards all use the updated snapshot.
@@ -557,11 +595,15 @@ def _submit_purchase(
             f"Bought {quantity} {product['name'].lower()} unit(s) for {format_euros(total)}.",
             "✅",
         )
-    st.session_state["v2_purchase_feedback"] = feedback
+    st.session_state[f"{_state_prefix(game_mode)}_purchase_feedback"] = feedback
 
 
 def _show_player_cafe(
-    session: dict, player: dict, section: str = "Today"
+    session: dict,
+    player: dict,
+    section: str = "Today",
+    *,
+    game_mode: str = "multiplayer",
 ) -> None:
     database = v2_storage.V2_DATABASE_PATH
     progress = v2_storage.get_player_progress(
@@ -570,11 +612,20 @@ def _show_player_cafe(
     history = v2_storage.load_player_trade_history(
         database, session["session_id"], player["player_id"]
     )
-    _show_new_player_credential()
-    action_message = st.session_state.pop("v2_player_action_message", None)
+    if game_mode == "single_player":
+        new_credentials = st.session_state.pop("solo_new_credentials", None)
+        if new_credentials:
+            st.warning("Save this private solo recovery credential. It is shown only once.")
+            st.write(f"Solo recovery code: `{new_credentials['join_code']}`")
+            st.write(f"Player name: **{new_credentials['nickname']}**")
+            st.code(new_credentials["recovery_credential"])
+    else:
+        _show_new_player_credential()
+    state_prefix = _state_prefix(game_mode)
+    action_message = st.session_state.pop(f"{state_prefix}_player_action_message", None)
     if action_message and section != "Today":
         st.success(action_message)
-    trade_message = st.session_state.pop("v2_last_trade_message", None)
+    trade_message = st.session_state.pop(f"{state_prefix}_last_trade_message", None)
     if trade_message and section != "Today":
         st.success(trade_message)
     last_day = session["trading_days"]
@@ -613,8 +664,10 @@ def _show_player_cafe(
             text=f"{min(progress['current_day'] - 1, last_day)} of {last_day} days completed",
         )
     if section == "Dashboard":
-        _show_management_dashboard(progress, history, last_day, can_trade)
-        if st.session_state.pop("v2_scroll_to_dashboard_start", False):
+        _show_management_dashboard(
+            progress, history, last_day, can_trade, game_mode=game_mode
+        )
+        if st.session_state.pop(f"{state_prefix}_scroll_to_dashboard_start", False):
             _scroll_to_dashboard_start()
         event = v2_storage.load_pending_day_three_event_popup(
             database, session["session_id"], player["player_id"]
@@ -625,7 +678,9 @@ def _show_player_cafe(
             )
         return
     if section == "Café Setup":
-        _show_menu_setup(database, session, player, progress, can_trade)
+        _show_menu_setup(
+            database, session, player, progress, can_trade, game_mode=game_mode
+        )
         return
     if section == "Final Report":
         if can_trade:
@@ -635,7 +690,8 @@ def _show_player_cafe(
             _show_final_performance_report(
                 v2_storage.get_player_final_report(
                     database, session["session_id"], player["player_id"]
-                )
+                ),
+                game_mode=game_mode,
             )
         return
     if not can_trade:
@@ -738,7 +794,7 @@ def _show_player_cafe(
                 except ValueError as error:
                     st.error(str(error))
                 else:
-                    st.session_state["v2_player_action_message"] = (
+                    st.session_state[f"{state_prefix}_player_action_message"] = (
                         f"{product['name']} selling price saved as {format_euros(saved)}."
                     )
                     st.rerun()
@@ -759,7 +815,7 @@ def _show_player_cafe(
                     f"Buy {product['name']}",
                     key=f"{form_key}_submit_{day}_{product['quantity']}",
                     on_click=_submit_purchase,
-                    args=(database, session["session_id"], player["player_id"], product, day, quantity_key),
+                    args=(database, session["session_id"], player["player_id"], product, day, quantity_key, game_mode),
                 )
 
     off_menu_stock = [
@@ -818,7 +874,7 @@ def _show_player_cafe(
             except sqlite3.Error:
                 st.error("The day could not be completed. Please try again.")
             else:
-                st.session_state["v2_player_action_message"] = (
+                st.session_state[f"{state_prefix}_player_action_message"] = (
                     f"Day {result['day']} completed. Revenue: "
                     f"{format_euros(result['totals']['revenue_cents'])}. "
                     f"Rent paid: {format_euros(result['rent_paid_cents'])} of "
@@ -828,8 +884,8 @@ def _show_player_cafe(
                     + (" Your café is bankrupt and your game has ended."
                        if result["bankrupt"] else "")
                 )
-                st.session_state["v2_scroll_to_dashboard_start"] = True
-                _navigate_to("Dashboard")
+                st.session_state[f"{state_prefix}_scroll_to_dashboard_start"] = True
+                _navigate_to("Dashboard", mode=game_mode)
         if cancel_col.button(
             "Cancel",
             key=f"v2_cancel_complete_{player['player_id']}_{progress['current_day']}",
@@ -842,7 +898,7 @@ def _show_player_cafe(
         st.toast(action_message, icon="✅")
     if trade_message:
         st.toast(trade_message, icon="✅")
-    if feedback := st.session_state.pop("v2_purchase_feedback", None):
+    if feedback := st.session_state.pop(f"{state_prefix}_purchase_feedback", None):
         message, icon = feedback
         st.toast(message, icon=icon)
 
@@ -1042,6 +1098,163 @@ def _show_waiting_room(
         "Refresh waiting room", key=f"refresh_{session_id}"
     ):
         st.rerun()
+
+
+def _start_solo_game_form(button_label: str) -> None:
+    """Collect solo settings and create the game through shared V2 storage."""
+
+    with st.form("solo_start_game_form"):
+        trading_days = st.number_input(
+            "Trading days",
+            min_value=1,
+            max_value=30,
+            value=v2_storage.DEFAULT_TRADING_DAYS,
+            step=1,
+        )
+        starting_cash = st.text_input(
+            "Starting cash (€)", value="2000.00", key="solo_starting_cash"
+        )
+        nickname = st.text_input(
+            "Player or café name",
+            max_chars=30,
+            value="My Café",
+            key="solo_cafe_name",
+        )
+        submitted = st.form_submit_button(
+            button_label, type="primary", use_container_width=True
+        )
+    if not submitted:
+        return
+    try:
+        game = v2_storage.create_solo_game_session(
+            v2_storage.V2_DATABASE_PATH,
+            trading_days=int(trading_days),
+            starting_budget=starting_cash,
+            nickname=nickname,
+        )
+    except ValueError as error:
+        st.error(str(error))
+        return
+    identity = {
+        "session_id": game["session_id"],
+        "player_id": game["player_id"],
+        "nickname": game["nickname"],
+        "recovery_credential": game["recovery_credential"],
+    }
+    st.session_state["solo_player"] = identity
+    st.session_state["solo_new_credentials"] = {
+        "join_code": game["join_code"],
+        "nickname": game["nickname"],
+        "recovery_credential": game["recovery_credential"],
+    }
+    st.session_state.pop("solo_confirm_new_game_pending", None)
+    st.session_state.pop("solo_create_new_form", None)
+    _navigate_to("Café Setup", mode="single_player")
+
+
+def _resume_solo_game_form() -> None:
+    with st.form("solo_resume_game_form"):
+        join_code = st.text_input("Solo recovery code", max_chars=6).strip().upper()
+        nickname = st.text_input("Saved player or café name", max_chars=30)
+        recovery_credential = st.text_input(
+            "Private solo recovery credential", type="password"
+        )
+        submitted = st.form_submit_button(
+            "Resume Solo Game", type="primary", use_container_width=True
+        )
+    if not submitted:
+        return
+    try:
+        progress = v2_storage.resume_solo_player_by_credentials(
+            v2_storage.V2_DATABASE_PATH,
+            join_code,
+            nickname,
+            recovery_credential,
+        )
+    except ValueError as error:
+        st.error(str(error))
+        return
+    st.session_state["solo_player"] = {
+        "session_id": progress["session_id"],
+        "player_id": progress["player_id"],
+        "nickname": progress["nickname"],
+        "recovery_credential": recovery_credential,
+    }
+    st.session_state["solo_player_action_message"] = (
+        f"Resumed solo game as {progress['nickname']}."
+    )
+    _navigate_to(_player_destination(progress), mode="single_player")
+
+
+def _solo_entry_page() -> None:
+    """Solo-only start and resume screen; no lobby or host controls."""
+
+    player = st.session_state.get("solo_player")
+    st.header("Single Player Game")
+    if player:
+        try:
+            session = v2_storage.get_game_session(
+                v2_storage.V2_DATABASE_PATH, player["session_id"]
+            )
+            progress = v2_storage.get_player_progress(
+                v2_storage.V2_DATABASE_PATH,
+                player["session_id"],
+                player["player_id"],
+            )
+        except ValueError as error:
+            st.error(str(error))
+            return
+        st.write(f"Current solo café: **{progress['nickname']}**")
+        if progress["current_day"] <= session["trading_days"] and not progress["is_bankrupt"]:
+            st.caption(
+                f"Saved progress: Day {progress['current_day']} of "
+                f"{session['trading_days']}. Starting a new solo game creates a "
+                "separate save; it does not delete this one."
+            )
+        else:
+            st.caption(
+                "This saved solo game is complete. Starting another creates a separate save."
+            )
+        if st.button("Continue Solo Game", type="primary", key="solo_continue_game"):
+            _navigate_to(_player_destination(progress), mode="single_player")
+
+        if not st.session_state.get("solo_create_new_form"):
+            if st.button("Start Another Solo Game", key="solo_request_new_game"):
+                st.session_state["solo_confirm_new_game_pending"] = True
+                st.rerun()
+        if st.session_state.get("solo_confirm_new_game_pending"):
+            st.warning(
+                "Create a separate solo game and switch to it? Your current saved "
+                "game will remain available to resume."
+            )
+            confirm, cancel = st.columns(2, gap="small")
+            if cancel.button("Cancel", key="solo_cancel_new_game"):
+                st.session_state.pop("solo_confirm_new_game_pending", None)
+                st.rerun()
+            if confirm.button(
+                "Confirm New Solo Game",
+                type="primary",
+                key="solo_confirm_new_game_button",
+            ):
+                st.session_state["solo_create_new_form"] = True
+                st.rerun()
+        if st.session_state.get("solo_create_new_form"):
+            _start_solo_game_form("Start Solo Game")
+            if st.button("Cancel New Solo Game", key="solo_cancel_create_form"):
+                st.session_state.pop("solo_confirm_new_game_pending", None)
+                st.session_state.pop("solo_create_new_form", None)
+                st.rerun()
+        else:
+            if not st.session_state.get("solo_confirm_new_game_pending"):
+                with st.expander("Resume a different saved solo game"):
+                    _resume_solo_game_form()
+    else:
+        st.write(
+            "Choose your game length and starting cash, then start playing immediately."
+        )
+        _start_solo_game_form("Start Solo Game")
+        st.subheader("Resume a saved solo game")
+        _resume_solo_game_form()
 
 
 def _host_page() -> None:
@@ -1253,8 +1466,11 @@ def _leaderboard_page() -> None:
     )
 
 
-def render() -> None:
-    """Render the six main areas of the multiplayer game."""
+def render(mode: str = "multiplayer") -> None:
+    """Render solo or multiplayer entry points over the shared player game."""
+
+    if mode not in {"single_player", "multiplayer"}:
+        raise ValueError("Game mode must be single_player or multiplayer.")
 
     v2_storage.initialize_v2_database(v2_storage.V2_DATABASE_PATH)
     st.markdown(
@@ -1287,32 +1503,56 @@ def render() -> None:
         """,
         unsafe_allow_html=True,
     )
-    st.title("☕ Campus Tycoon 2.0")
-    st.caption("A Lisbon café game. Plan your menu, serve your customers, grow your result.")
-    navigation_sections = _available_navigation_sections()
-    next_section = st.session_state.pop("v2_next_section", None)
+    if mode == "single_player":
+        st.title("☕ Campus Tycoon 1.0 · Single Player")
+        st.caption("Build and run your own Lisbon café using the shared Campus Tycoon game engine.")
+    else:
+        st.title("☕ Campus Tycoon 2.0")
+        st.caption("A Lisbon café game. Plan your menu, serve your customers, grow your result.")
+
+    next_key, navigation_key = _navigation_keys(mode)
+    saved_navigation_key = f"{mode}_saved_navigation"
+    navigation_sections = _available_navigation_sections(mode)
+    next_section = st.session_state.pop(next_key, None)
     if next_section in navigation_sections:
-        st.session_state["v2_main_navigation"] = next_section
-    if st.session_state.get("v2_main_navigation") not in navigation_sections:
-        st.session_state["v2_main_navigation"] = navigation_sections[0]
+        st.session_state[navigation_key] = next_section
+        st.session_state[saved_navigation_key] = next_section
+    elif navigation_key not in st.session_state:
+        saved_section = st.session_state.get(saved_navigation_key)
+        if saved_section in navigation_sections:
+            st.session_state[navigation_key] = saved_section
+    if st.session_state.get(navigation_key) not in navigation_sections:
+        st.session_state[navigation_key] = navigation_sections[0]
+        st.session_state[saved_navigation_key] = navigation_sections[0]
 
     page = st.sidebar.radio(
         "GAME SECTION",
         navigation_sections,
-        key="v2_main_navigation",
+        key=navigation_key,
+        on_change=_remember_navigation_choice,
+        args=(navigation_key, saved_navigation_key),
     )
-    if page == "Host / Join Game":
-        _host_join_page()
-        return
-    st.session_state.pop("v2_waiting_player", None)
-    if page == "Leaderboard":
-        _leaderboard_page()
-        return
-
-    player = st.session_state.get("v2_player")
+    if mode == "single_player":
+        if page == "Solo Game":
+            _solo_entry_page()
+            return
+        player = st.session_state.get("solo_player")
+    else:
+        if page == "Host / Join Game":
+            _host_join_page()
+            return
+        st.session_state.pop("v2_waiting_player", None)
+        if page == "Leaderboard":
+            _leaderboard_page()
+            return
+        player = st.session_state.get("v2_player")
     if not player:
-        st.info("Join or resume a game before opening your café pages.")
-        st.caption("Use **Host / Join Game** to get started.")
+        if mode == "single_player":
+            st.info("Start or resume a solo game to open your café pages.")
+            st.caption("Use **Solo Game** to continue.")
+        else:
+            st.info("Join or resume a game before opening your café pages.")
+            st.caption("Use **Host / Join Game** to get started.")
         return
     try:
         session = v2_storage.get_game_session(
@@ -1321,9 +1561,12 @@ def render() -> None:
     except ValueError as error:
         st.error(str(error))
         return
+    if session["mode"] != mode:
+        st.error("This saved game belongs to a different game mode.")
+        return
 
     if page in {"Café Setup", "Today", "Dashboard", "Final Report"}:
-        if session["status"] == "waiting":
+        if mode == "multiplayer" and session["status"] == "waiting":
             if st.button("Refresh game status", key="v2_refresh_game_status", use_container_width=True):
                 st.rerun()
-        _show_player_cafe(session, player, section=page)
+        _show_player_cafe(session, player, section=page, game_mode=mode)

@@ -1,6 +1,6 @@
 # Campus Tycoon
 
-A local campus café simulation built with Python, Streamlit, and SQLite. The app keeps the original V1 game available and adds V2 multiplayer session creation, joining, waiting rooms, and secure resume. V2 trading rules and gameplay screens are still planned for later phases.
+A campus café simulation built with Python 3.12, Streamlit, and SQLite. Single Player and Multiplayer now use the same café gameplay, business rules, player screens, and database engine. Only the way a game is created and accessed differs.
 
 ## Requirements
 
@@ -16,12 +16,20 @@ uv sync
 uv run streamlit run app.py
 ```
 
-The local V1 database (`campus_tycoon.sqlite3`) and separate V2 multiplayer database (`campus_tycoon_v2.sqlite3`) are created automatically in the project folder. Both are ignored by Git and kept when the application is restarted.
+The new shared game database (`campus_tycoon_v2.sqlite3`) is created automatically in the project folder and kept when the application is restarted. It stores each game in a separate session and player identity. Single-player sessions start immediately with one player. Multiplayer sessions use a host, join code, waiting room, and independent players.
 
-To open the multiplayer game, choose **Campus Tycoon 2.0 · Multiplayer** in the left version selector. The host creates a game and shares its six-character code. The host must also save the private host credential to start the session. Each player should save their one-time recovery credential to resume later. Once the host starts, each player chooses a location, edits their own menu from the 12-product V2 catalogue, then buys stock, sets prices, and completes trading days independently. Daily demand uses the approved deterministic persona model. Rent is charged once after daily sales; if cash cannot cover rent, the remaining cash is applied, the shortfall is forgiven, and that player's game ends at €0. The final score is final cash minus starting cash, with no recovery value for unsold stock. The management dashboard summarizes each player's own results, inventory, and completed days. Finished players receive a saved-data performance report. Open **Leaderboard** to compare players in the current session; its ranking stays provisional until everyone finishes.
+To play alone, choose **Campus Tycoon 1.0 · Single Player**, enter the game length and starting cash, and start. The game opens directly at Day 0 location setup. Save the one-time solo recovery code and private credential so you can resume in another browser.
+
+To play with others, choose **Campus Tycoon 2.0 · Multiplayer**. The host creates a game and shares its six-character code and private host credential. Each player saves their one-time recovery credential. Once the host starts, players choose locations and manage their own cafés independently.
+
+Both modes use the same 12-product catalogue, five-product menu limit, deterministic persona demand, rent, events, dashboard, and final report. Daily rent is charged once after sales; if cash cannot cover it, the remaining cash is applied, the shortfall is forgiven, and that player's game ends at €0. The final score is final cash minus starting cash, with no recovery value for unsold stock. The Multiplayer mode also has a session leaderboard.
+
+The original singleton V1 database (`campus_tycoon.sqlite3`) and its storage code are retained and never reset or automatically migrated. Because that save uses the older three-product game and different scoring rules, it cannot be resumed as a new shared-engine game.
 
 ## Run the tests
 
 ```bash
 uv run pytest
 ```
+
+See [docs/SHARED_MODES.md](docs/SHARED_MODES.md) for the shared architecture, data compatibility, manual test steps, and known gaps.

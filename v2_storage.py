@@ -125,7 +125,9 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                 starting_budget_cents INTEGER NOT NULL CHECK (starting_budget_cents > 0),
                 status TEXT NOT NULL CHECK (status IN ('waiting', 'active', 'finished')),
                 created_at TEXT NOT NULL,
-                host_credential_hash TEXT
+                host_credential_hash TEXT,
+                mode TEXT NOT NULL DEFAULT 'multiplayer'
+                    CHECK (mode IN ('single_player', 'multiplayer'))
             );
 
             CREATE TABLE IF NOT EXISTS players (
@@ -293,6 +295,25 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
             connection.execute(
                 "ALTER TABLE game_sessions ADD COLUMN host_credential_hash TEXT"
             )
+        if "mode" not in session_columns:
+            connection.execute(
+                "ALTER TABLE game_sessions ADD COLUMN mode TEXT NOT NULL "
+                "DEFAULT 'multiplayer' CHECK (mode IN ('single_player', 'multiplayer'))"
+            )
+        connection.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS single_player_session_one_player
+            BEFORE INSERT ON players
+            WHEN (SELECT mode FROM game_sessions
+                  WHERE session_id = NEW.session_id) = 'single_player'
+              AND EXISTS (
+                  SELECT 1 FROM players WHERE session_id = NEW.session_id
+              )
+            BEGIN
+                SELECT RAISE(ABORT, 'a solo game can contain only one player');
+            END;
+            """
+        )
         player_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(players)")
         }
@@ -472,8 +493,8 @@ def create_game_session(
                         INSERT INTO game_sessions
                             (session_id, join_code, trading_days,
                              starting_budget_cents, status, created_at,
-                             host_credential_hash)
-                        VALUES (?, ?, ?, ?, 'waiting', ?, ?)
+                             host_credential_hash, mode)
+                        VALUES (?, ?, ?, ?, 'waiting', ?, ?, 'multiplayer')
                         """,
                         (
                             session_id,
@@ -496,6 +517,106 @@ def create_game_session(
     raise RuntimeError("Could not generate a unique session code. Please try again.")
 
 
+def create_solo_game_session(
+    database_path: str | Path = V2_DATABASE_PATH,
+    *,
+    trading_days: object = DEFAULT_TRADING_DAYS,
+    starting_budget: object = "2000.00",
+    nickname: object = "My Café",
+) -> dict:
+    """Create and start one persistent solo session and its only player atomically.
+
+    The returned session code and recovery credential are shown once so the
+    player can resume the game after losing browser session state.
+    """
+
+    days = _positive_whole_number(trading_days, "Trading days")
+    if not MIN_TRADING_DAYS <= days <= MAX_TRADING_DAYS:
+        raise ValueError("Trading days must be between 1 and 30.")
+    budget_cents = price_to_cents(starting_budget)
+    if not MIN_STARTING_BUDGET_CENTS <= budget_cents <= MAX_STARTING_BUDGET_CENTS:
+        raise ValueError("Starting cash must be between €1.00 and €10,000.00.")
+    display_name, nickname_key = _normalize_nickname(nickname)
+    initialize_v2_database(database_path)
+
+    player_id = str(uuid.uuid4())
+    recovery_credential = secrets.token_urlsafe(32)
+    for _ in range(MAX_SESSION_CODE_ATTEMPTS):
+        session_id = str(uuid.uuid4())
+        join_code = _new_session_code()
+        try:
+            with _connect(database_path) as connection:
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute(
+                        """INSERT INTO game_sessions
+                           (session_id, join_code, trading_days,
+                            starting_budget_cents, status, created_at,
+                            host_credential_hash, mode)
+                           VALUES (?, ?, ?, ?, 'active', ?, NULL, 'single_player')""",
+                        (
+                            session_id,
+                            join_code,
+                            days,
+                            budget_cents,
+                            _now_utc(),
+                        ),
+                    )
+                    connection.execute(
+                        """INSERT INTO players
+                           (player_id, session_id, nickname, nickname_key,
+                            is_host, recovery_credential_hash,
+                            starting_cash_cents, cash_cents, current_day,
+                            created_at)
+                           VALUES (?, ?, ?, ?, 0, ?, ?, ?, 1, ?)""",
+                        (
+                            player_id,
+                            session_id,
+                            display_name,
+                            nickname_key,
+                            _credential_hash(recovery_credential),
+                            budget_cents,
+                            budget_cents,
+                            _now_utc(),
+                        ),
+                    )
+                    for product in PRODUCT_CATALOGUE:
+                        connection.execute(
+                            """INSERT INTO player_inventory
+                               (session_id, player_id, product_key, quantity,
+                                selected_price_cents)
+                               VALUES (?, ?, ?, 0, ?)""",
+                            (
+                                session_id,
+                                player_id,
+                                product.key,
+                                product.reference_price_cents,
+                            ),
+                        )
+                    connection.executemany(
+                        """INSERT INTO player_menu
+                           (session_id, player_id, product_key)
+                           VALUES (?, ?, ?)""",
+                        [
+                            (session_id, player_id, product_key)
+                            for product_key in DEFAULT_MENU_KEYS
+                        ],
+                    )
+        except sqlite3.IntegrityError as error:
+            if "join_code" in str(error) or "UNIQUE constraint failed" in str(error):
+                continue
+            raise
+        return {
+            **get_game_session(database_path, session_id),
+            "player_id": player_id,
+            "nickname": display_name,
+            "starting_cash_cents": budget_cents,
+            "recovery_credential": recovery_credential,
+        }
+
+    raise RuntimeError("Could not generate a unique solo game code. Please try again.")
+
+
 def get_game_session(
     database_path: str | Path,
     session_id: str,
@@ -506,7 +627,7 @@ def get_game_session(
     with _connect(database_path) as connection:
         row = connection.execute(
             """SELECT session_id, join_code, trading_days,
-                      starting_budget_cents, status, created_at
+                      starting_budget_cents, status, created_at, mode
                FROM game_sessions WHERE session_id = ?""",
             (session_id,),
         ).fetchone()
@@ -539,7 +660,7 @@ def get_game_session_by_code(
     with _connect(database_path) as connection:
         row = connection.execute(
             """SELECT session_id, join_code, trading_days,
-                      starting_budget_cents, status, created_at
+                      starting_budget_cents, status, created_at, mode
                FROM game_sessions WHERE join_code = ?""",
             (join_code.strip().upper(),),
         ).fetchone()
@@ -556,6 +677,8 @@ def authenticate_host(
     """Verify the private host secret before restoring host controls."""
 
     session = get_game_session_by_code(database_path, join_code)
+    if session["mode"] != "multiplayer":
+        raise ValueError("Host controls are not available for a solo game.")
     with _connect(database_path) as connection:
         row = connection.execute(
             "SELECT host_credential_hash FROM game_sessions WHERE session_id = ?",
@@ -682,7 +805,7 @@ def join_game_session(
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
                 session = connection.execute(
-                    """SELECT session_id, starting_budget_cents, status
+                    """SELECT session_id, starting_budget_cents, status, mode
                        FROM game_sessions WHERE join_code = ?""",
                     (code,),
                 ).fetchone()
@@ -690,6 +813,8 @@ def join_game_session(
                     raise ValueError("Game session was not found.")
                 if session["status"] != "waiting":
                     raise ValueError("This game session is no longer accepting players.")
+                if session["mode"] != "multiplayer":
+                    raise ValueError("Solo games do not accept additional players.")
 
                 existing = connection.execute(
                     """SELECT 1 FROM players
@@ -768,11 +893,13 @@ def start_game_session(
         with connection:
             connection.execute("BEGIN IMMEDIATE")
             session = connection.execute(
-                "SELECT status, host_credential_hash FROM game_sessions WHERE session_id = ?",
+                "SELECT status, host_credential_hash, mode FROM game_sessions WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
             if session is None:
                 raise ValueError("Game session was not found.")
+            if session["mode"] != "multiplayer":
+                raise ValueError("Only multiplayer sessions use host start controls.")
             if (
                 not isinstance(host_credential, str)
                 or not session["host_credential_hash"]
@@ -1088,10 +1215,16 @@ def resume_player_by_credentials(
     join_code: str,
     nickname: str,
     recovery_credential: str,
+    *,
+    expected_mode: str = "multiplayer",
 ) -> dict:
-    """Resume by public session code, normalized nickname, and private secret."""
+    """Resume by session code, nickname, secret, and the caller's game mode."""
 
     session = get_game_session_by_code(database_path, join_code)
+    if expected_mode not in {"single_player", "multiplayer"}:
+        raise ValueError("The requested game mode is invalid.")
+    if session["mode"] != expected_mode:
+        raise ValueError("The saved game belongs to a different game mode.")
     _, nickname_key = _normalize_nickname(nickname)
     with _connect(database_path) as connection:
         row = connection.execute(
@@ -1109,6 +1242,23 @@ def resume_player_by_credentials(
         raise ValueError("Player could not be resumed with those credentials.")
     progress = get_player_progress(database_path, session["session_id"], row["player_id"])
     return progress
+
+
+def resume_solo_player_by_credentials(
+    database_path: str | Path,
+    join_code: str,
+    nickname: str,
+    recovery_credential: str,
+) -> dict:
+    """Resume only a solo-mode player using their private recovery details."""
+
+    return resume_player_by_credentials(
+        database_path,
+        join_code,
+        nickname,
+        recovery_credential,
+        expected_mode="single_player",
+    )
 
 
 def purchase_player_stock(
