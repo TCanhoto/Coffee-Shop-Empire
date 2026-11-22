@@ -11,6 +11,7 @@ from demand_engine import calculate_v2_demand
 from estimate_ranges import demand_estimate_range
 import v2_storage
 import v2_events
+import v2_interface
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -30,7 +31,7 @@ def click(app, label):
 
 
 def section_widget(app):
-    return next(item for item in app.sidebar.selectbox if item.label == "Game section")
+    return next(item for item in app.sidebar.radio if item.label == "GAME SECTION")
 
 
 def selected_section(app):
@@ -72,14 +73,24 @@ def test_host_creates_once_and_reruns_do_not_duplicate_sessions(tmp_path, monkey
 def test_game_section_is_in_sidebar_below_version_selector_without_main_duplicate(
     tmp_path, monkeypatch
 ):
-    app = open_v2_app(monkeypatch, tmp_path / "sidebar-navigation.sqlite3")
+    database = tmp_path / "sidebar-navigation.sqlite3"
+    session = v2_storage.create_game_session(database)
+    player = v2_storage.join_game_session(database, session["join_code"], "Alex")
+    blair = v2_storage.join_game_session(database, session["join_code"], "Blair")
+    v2_storage.start_game_session(database, session["session_id"], session["host_credential"])
+    v2_storage.select_player_location(
+        database, session["session_id"], player["player_id"], "carcavelos_nova_sbe"
+    )
+    app = resume_in_app(open_v2_app(monkeypatch, database), session, player)
 
     assert app.sidebar.radio[0].label == "Game version"
-    assert app.sidebar.selectbox[0].label == "Game section"
-    assert app.sidebar.selectbox[0].key == "v2_main_navigation"
-    assert len(app.sidebar.selectbox) == 1
+    assert app.sidebar.radio[1].label == "GAME SECTION"
+    assert app.sidebar.radio[1].key == "v2_main_navigation"
+    assert len(app.sidebar.radio) == 2
+    assert len(app.sidebar.selectbox) == 0
     assert len(app.main.selectbox) == 0
-    assert app.sidebar.selectbox[0].options == [
+    assert not any(item.label == "GAME SECTION" for item in app.main.radio)
+    assert app.sidebar.radio[1].options == [
         "Host / Join Game",
         "Café Setup",
         "Today",
@@ -87,11 +98,23 @@ def test_game_section_is_in_sidebar_below_version_selector_without_main_duplicat
         "Leaderboard",
         "Final Report",
     ]
+    assert selected_section(app) == "Today"
 
-    for destination in app.sidebar.selectbox[0].options:
+    for destination in app.sidebar.radio[1].options:
         app = navigate(app, destination)
         assert not app.exception
         assert selected_section(app) == destination
+
+    # A browser without a player sees only the real entry page, not disabled
+    # café destinations that it cannot access yet.
+    anonymous = open_v2_app(monkeypatch, tmp_path / "anonymous-sidebar.sqlite3")
+    assert section_widget(anonymous).options == ["Host / Join Game"]
+
+    blair_app = resume_in_app(open_v2_app(monkeypatch, database), session, blair)
+    app = navigate(app, "Dashboard")
+    blair_app = navigate(blair_app, "Today")
+    assert selected_section(app) == "Dashboard"
+    assert selected_section(blair_app) == "Today"
 
 
 def test_join_rejects_invalid_code_and_successful_reruns_do_not_duplicate_player(
@@ -253,6 +276,12 @@ def test_day_three_event_popup_shows_saved_effect_and_acknowledges_without_tradi
 
 
 def test_active_player_can_buy_set_price_and_complete_day_once(tmp_path, monkeypatch):
+    scroll_requests = []
+    monkeypatch.setattr(
+        v2_interface.st,
+        "iframe",
+        lambda html, height: scroll_requests.append((html, height)),
+    )
     database = tmp_path / "v2.sqlite3"
     session = v2_storage.create_game_session(database, trading_days=2)
     player = v2_storage.join_game_session(database, session["join_code"], "Alex")
@@ -297,6 +326,10 @@ def test_active_player_can_buy_set_price_and_complete_day_once(tmp_path, monkeyp
     app = click(app, "Confirm Complete Day")
     assert not app.exception
     assert selected_section(app) == "Dashboard"
+    assert len(scroll_requests) == 1
+    assert scroll_requests[0][1] == 1
+    assert 'getElementById("management-dashboard")' in scroll_requests[0][0]
+    assert 'scrollIntoView({ block: "start", behavior: "auto" })' in scroll_requests[0][0]
     assert any(item.value == "Day 1 results" for item in app.subheader)
     assert any("Rent:" in item.value for item in app.caption)
 
@@ -312,6 +345,19 @@ def test_active_player_can_buy_set_price_and_complete_day_once(tmp_path, monkeyp
     assert len(history) == 1
     assert history[0]["day"] == 1
     assert history[0]["event"] is None
+
+    # The scroll request is one-shot: a normal rerun/refresh must not scroll
+    # again or replay the completed trading day.
+    app.run()
+    assert not app.exception
+    assert len(scroll_requests) == 1
+    assert v2_storage.get_player_progress(
+        database, session["session_id"], player["player_id"]
+    ) == progress
+    assert v2_storage.load_player_trade_history(
+        database, session["session_id"], player["player_id"]
+    ) == history
+
     app = click(app, "Continue to Day 2")
     assert selected_section(app) == "Today"
     assert any(button.label == "Complete Day 2" for button in app.button)
@@ -321,6 +367,57 @@ def test_active_player_can_buy_set_price_and_complete_day_once(tmp_path, monkeyp
     assert v2_storage.load_player_trade_history(
         database, session["session_id"], player["player_id"]
     ) == history
+
+
+def test_later_day_completion_scrolls_once_and_preserves_final_dashboard(
+    tmp_path, monkeypatch
+):
+    scroll_requests = []
+    monkeypatch.setattr(
+        v2_interface.st,
+        "iframe",
+        lambda html, height: scroll_requests.append((html, height)),
+    )
+    database = tmp_path / "later-day-dashboard-scroll.sqlite3"
+    session = v2_storage.create_game_session(database, trading_days=2)
+    player = v2_storage.join_game_session(database, session["join_code"], "Alex")
+    v2_storage.start_game_session(database, session["session_id"], session["host_credential"])
+    v2_storage.select_player_location(
+        database, session["session_id"], player["player_id"], "carcavelos_nova_sbe"
+    )
+    v2_storage.trade_player_day(database, session["session_id"], player["player_id"], 1)
+
+    app = resume_in_app(open_v2_app(monkeypatch, database), session, player)
+    assert selected_section(app) == "Dashboard"
+    assert not scroll_requests  # Resume does not request an automatic jump.
+    app = click(app, "Continue to Day 2")
+    assert selected_section(app) == "Today"
+    before_history = v2_storage.load_player_trade_history(
+        database, session["session_id"], player["player_id"]
+    )
+    app = click(app, "Complete Day 2")
+    app = click(app, "Confirm Complete Day")
+
+    assert not app.exception
+    assert selected_section(app) == "Dashboard"
+    assert len(scroll_requests) == 1
+    assert any(item.value == "Management Dashboard" for item in app.subheader)
+    assert any(button.label == "View Final Report" for button in app.button)
+    assert not any(button.label.startswith("Continue to Day") for button in app.button)
+    history = v2_storage.load_player_trade_history(
+        database, session["session_id"], player["player_id"]
+    )
+    assert [item["day"] for item in history] == [1, 2]
+    assert len(history) == len(before_history) + 1
+    assert v2_storage.get_player_progress(
+        database, session["session_id"], player["player_id"]
+    )["current_day"] == 3
+
+    app.run()
+    assert len(scroll_requests) == 1
+    assert [item["day"] for item in v2_storage.load_player_trade_history(
+        database, session["session_id"], player["player_id"]
+    )] == [1, 2]
 
 
 def test_pretrade_demand_ranges_follow_each_players_own_menu_and_location(
@@ -627,6 +724,12 @@ def test_management_dashboard_numbers_history_charts_and_player_isolation(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(v2_storage, "_get_or_create_session_event", lambda *args: (None, None))
+    chart_calls = []
+    monkeypatch.setattr(
+        v2_interface.st,
+        "altair_chart",
+        lambda chart, **options: chart_calls.append((chart, options)),
+    )
     database = tmp_path / "v2.sqlite3"
     session = v2_storage.create_game_session(database, trading_days=3)
     player_a = v2_storage.join_game_session(database, session["join_code"], "Alex")
@@ -677,10 +780,52 @@ def test_management_dashboard_numbers_history_charts_and_player_isolation(
             "Daily results history",
         )
     )
+    rendered_charts = chart_calls[-3:]
+    assert len(rendered_charts) == 3
+    chart_specs = [chart.to_dict() for chart, _ in rendered_charts]
+    assert [spec["mark"]["type"] for spec in chart_specs] == ["line", "line", "bar"]
+    assert chart_specs[0]["data"]["values"] == [
+        {
+            "Day": item["day"],
+            "Revenue (€)": item["totals"]["revenue_cents"] / 100,
+        }
+        for item in history
+    ]
+    assert chart_specs[1]["data"]["values"] == [
+        {"Day": 0, "Cash (€)": progress["starting_cash_cents"] / 100},
+        *[
+            {"Day": item["day"], "Cash (€)": item["cash_cents_after"] / 100}
+            for item in history
+        ],
+    ]
+    assert chart_specs[2]["data"]["values"] == [
+        {"Product": item["name"], "Units sold": sum(
+            day_product["units_sold"]
+            for day in history
+            for day_product in day["products"]
+            if day_product["product_key"] == item["product_key"]
+        )}
+        for item in sorted(
+            progress["products"],
+            key=lambda product: (
+                -sum(
+                    day_product["units_sold"]
+                    for day in history
+                    for day_product in day["products"]
+                    if day_product["product_key"] == product["product_key"]
+                ),
+                product["name"].casefold(),
+            ),
+        )
+    ]
+    assert all("params" not in spec and "selection" not in spec for spec in chart_specs)
+    assert all(options["on_select"] == "ignore" for _, options in rendered_charts)
     frames = [frame.value for frame in app.dataframe]
+    static_tables = [table.value for table in app.table]
+    assert len(static_tables) == 2
     product_sales = next(
         frame
-        for frame in frames
+        for frame in static_tables
         if "Rank" in frame.columns and "Units sold" in frame.columns
     )
     bica_sales = sum(
@@ -697,7 +842,7 @@ def test_management_dashboard_numbers_history_charts_and_player_isolation(
     )
     inventory_table = next(
         frame
-        for frame in frames
+        for frame in static_tables
         if "Units in stock" in frame.columns and "Product" in frame.columns
     )
     bica_stock = next(

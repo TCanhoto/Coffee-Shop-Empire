@@ -2,6 +2,7 @@
 
 import sqlite3
 
+import altair as alt
 import streamlit as st
 
 import v2_storage
@@ -22,9 +23,32 @@ def _save_player_identity(progress: dict, recovery_credential: str) -> None:
 
 
 def _navigate_to(section: str) -> None:
-    # The selectbox already exists in this run. Apply the new choice on rerun.
+    # The navigation widget already exists in this run. Apply the new choice on rerun.
     st.session_state["v2_next_section"] = section
     st.rerun()
+
+
+def _scroll_to_dashboard_start() -> None:
+    """Scroll once to the Dashboard heading after a completed trade.
+
+    Streamlit reruns preserve the browser's scroll position. This tiny,
+    same-origin iframe runs only when the trade handler requests it. Its
+    target is the stable Streamlit heading anchor; the scroll margin leaves
+    room for the sticky business header on desktop and mobile.
+    """
+
+    st.iframe(
+        """<!doctype html><html><body><script>
+        const dashboard = window.parent.document.getElementById("management-dashboard");
+        if (dashboard) {
+          dashboard.style.scrollMarginTop = "10rem";
+          dashboard.scrollIntoView({ block: "start", behavior: "auto" });
+        }
+        </script></body></html>""",
+        # Streamlit requires a positive height; one pixel keeps this helper
+        # visually unobtrusive while remaining valid in the installed version.
+        height=1,
+    )
 
 
 def _player_destination(progress: dict) -> str:
@@ -33,6 +57,20 @@ def _player_destination(progress: dict) -> str:
     if progress["current_day"] > 1:
         return "Dashboard"
     return "Today"
+
+
+def _available_navigation_sections() -> list[str]:
+    """Return sections available to this browser's current V2 identity."""
+
+    sections = ["Host / Join Game"]
+    player = st.session_state.get("v2_player")
+    if player:
+        sections.extend(
+            ["Café Setup", "Today", "Dashboard", "Leaderboard", "Final Report"]
+        )
+    elif st.session_state.get("v2_host_session_id"):
+        sections.append("Leaderboard")
+    return sections
 
 
 def _session_summary(session: dict) -> None:
@@ -137,14 +175,7 @@ def _show_management_dashboard(
     else:
         day_value = f"{progress['current_day']} of {total_days}"
 
-    st.subheader("Management Dashboard")
-    if history:
-        _show_day_results(history[-1])
-        if can_trade:
-            if st.button(f"Continue to Day {progress['current_day']}", type="primary"):
-                _navigate_to("Today")
-        elif st.button("View Final Report", type="primary"):
-            _navigate_to("Final Report")
+    st.subheader("Management Dashboard", anchor="management-dashboard")
     first_row = st.columns(2, gap="small")
     first_row[0].metric("Available cash", format_euros(progress["cash_cents"]))
     first_row[1].metric("Current day", day_value)
@@ -166,8 +197,16 @@ def _show_management_dashboard(
         "value at the end of the game."
     )
 
+    if history:
+        _show_day_results(history[-1])
+        if can_trade:
+            if st.button(f"Continue to Day {progress['current_day']}", type="primary"):
+                _navigate_to("Today")
+        elif st.button("View Final Report", type="primary"):
+            _navigate_to("Final Report")
+
     st.subheader("Current inventory")
-    st.dataframe(
+    st.table(
         [
             {
                 "Product": product["name"],
@@ -190,33 +229,73 @@ def _show_management_dashboard(
         )
         return
 
-    day_numbers = [item["day"] for item in history]
     st.subheader("Revenue by completed day")
-    st.line_chart(
+    revenue_values = [
         {
-            "Day": day_numbers,
-            "Revenue (€)": [
-                item["totals"]["revenue_cents"] / 100 for item in history
+            "Day": item["day"],
+            "Revenue (€)": item["totals"]["revenue_cents"] / 100,
+        }
+        for item in history
+    ]
+    revenue_chart = (
+        alt.Chart(alt.Data(values=revenue_values))
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("Day:Q", axis=alt.Axis(title="Day", tickMinStep=1)),
+            y=alt.Y(
+                "Revenue (€):Q",
+                axis=alt.Axis(title="Revenue (€)"),
+                scale=alt.Scale(zero=True),
+            ),
+            tooltip=[
+                alt.Tooltip("Day:Q", title="Day", format=".0f"),
+                alt.Tooltip("Revenue (€):Q", title="Revenue", format=",.2f"),
             ],
-        },
-        x="Day",
-        y="Revenue (€)",
-        height=240,
+        )
+        .properties(height=240)
+    )
+    st.altair_chart(
+        revenue_chart,
         width="stretch",
+        height=240,
+        on_select="ignore",
+        key="v2_dashboard_revenue_chart",
+        alt="Revenue in euros by completed trading day",
     )
 
     st.subheader("Cash balance over time")
     st.caption("Closing cash after each completed day, with starting cash at Day 0.")
-    cash_days = [0, *day_numbers]
-    cash_values = [progress["starting_cash_cents"] / 100] + [
-        item["cash_cents_after"] / 100 for item in history
+    cash_values = [
+        {"Day": 0, "Cash (€)": progress["starting_cash_cents"] / 100},
+        *[
+            {"Day": item["day"], "Cash (€)": item["cash_cents_after"] / 100}
+            for item in history
+        ],
     ]
-    st.line_chart(
-        {"Day": cash_days, "Cash (€)": cash_values},
-        x="Day",
-        y="Cash (€)",
-        height=240,
+    cash_chart = (
+        alt.Chart(alt.Data(values=cash_values))
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("Day:Q", axis=alt.Axis(title="Day", tickMinStep=1)),
+            y=alt.Y(
+                "Cash (€):Q",
+                axis=alt.Axis(title="Cash (€)"),
+                scale=alt.Scale(zero=True),
+            ),
+            tooltip=[
+                alt.Tooltip("Day:Q", title="Day", format=".0f"),
+                alt.Tooltip("Cash (€):Q", title="Cash", format=",.2f"),
+            ],
+        )
+        .properties(height=240)
+    )
+    st.altair_chart(
+        cash_chart,
         width="stretch",
+        height=240,
+        on_select="ignore",
+        key="v2_dashboard_cash_chart",
+        alt="Closing cash balance in euros, including starting cash on Day 0",
     )
 
     units_by_product = {item["product_key"]: 0 for item in progress["products"]}
@@ -239,16 +318,37 @@ def _show_management_dashboard(
         for key, units in ranked_products
     ]
     st.subheader("Units sold by product")
-    st.bar_chart(
-        product_rows,
-        x="Product",
-        y="Units sold",
-        horizontal=True,
-        height=max(250, min(420, 28 * len(product_rows))),
+    units_chart = (
+        alt.Chart(alt.Data(values=product_rows))
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "Units sold:Q",
+                axis=alt.Axis(title="Units sold"),
+                scale=alt.Scale(zero=True),
+            ),
+            y=alt.Y(
+                "Product:N",
+                axis=alt.Axis(title="Product"),
+                sort=alt.SortField(field="Units sold", order="descending"),
+            ),
+            tooltip=[
+                alt.Tooltip("Product:N", title="Product"),
+                alt.Tooltip("Units sold:Q", title="Units sold", format=",.0f"),
+            ],
+        )
+        .properties(height=max(250, min(420, 28 * len(product_rows))))
+    )
+    st.altair_chart(
+        units_chart,
         width="stretch",
+        height=max(250, min(420, 28 * len(product_rows))),
+        on_select="ignore",
+        key="v2_dashboard_units_chart",
+        alt="Units sold for each product across completed trading days",
     )
     st.subheader("Best-selling products")
-    st.dataframe(
+    st.table(
         [
             {"Rank": rank, **row}
             for rank, row in enumerate(product_rows, start=1)
@@ -514,6 +614,8 @@ def _show_player_cafe(
         )
     if section == "Dashboard":
         _show_management_dashboard(progress, history, last_day, can_trade)
+        if st.session_state.pop("v2_scroll_to_dashboard_start", False):
+            _scroll_to_dashboard_start()
         event = v2_storage.load_pending_day_three_event_popup(
             database, session["session_id"], player["player_id"]
         )
@@ -726,6 +828,7 @@ def _show_player_cafe(
                     + (" Your café is bankrupt and your game has ended."
                        if result["bankrupt"] else "")
                 )
+                st.session_state["v2_scroll_to_dashboard_start"] = True
                 _navigate_to("Dashboard")
         if cancel_col.button(
             "Cancel",
@@ -1186,20 +1289,16 @@ def render() -> None:
     )
     st.title("☕ Campus Tycoon 2.0")
     st.caption("A Lisbon café game. Plan your menu, serve your customers, grow your result.")
+    navigation_sections = _available_navigation_sections()
     next_section = st.session_state.pop("v2_next_section", None)
-    if next_section is not None:
+    if next_section in navigation_sections:
         st.session_state["v2_main_navigation"] = next_section
+    if st.session_state.get("v2_main_navigation") not in navigation_sections:
+        st.session_state["v2_main_navigation"] = navigation_sections[0]
 
-    page = st.sidebar.selectbox(
-        "Game section",
-        [
-            "Host / Join Game",
-            "Café Setup",
-            "Today",
-            "Dashboard",
-            "Leaderboard",
-            "Final Report",
-        ],
+    page = st.sidebar.radio(
+        "GAME SECTION",
+        navigation_sections,
         key="v2_main_navigation",
     )
     if page == "Host / Join Game":
