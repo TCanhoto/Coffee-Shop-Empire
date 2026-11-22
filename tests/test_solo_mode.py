@@ -425,6 +425,14 @@ def test_solo_workflow_uses_same_setup_trade_dashboard_and_final_report(
     app = click(app, "Save menu")
     assert not app.exception
     assert next(item for item in app.sidebar.radio if item.label == "GAME SECTION").value == "Today"
+    assert any(
+        item.value.startswith("How demand works: 10% of passers-by")
+        for item in app.markdown
+    )
+    assert not any(
+        "How persona prices affect demand" in str(item)
+        for item in app.get("expander")
+    )
     assert any(toast.proto.body and "menu was saved" in toast.proto.body for toast in app.get("toast"))
     app = click(app, "Buy Bica")
     app = click(app, "Complete Day 1")

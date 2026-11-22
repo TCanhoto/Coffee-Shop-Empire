@@ -689,17 +689,6 @@ def _show_player_cafe(
         "with unsold inventory. Customers won't switch to another product if "
         "their preferred item is out of stock."
     )
-    with st.expander("How persona prices affect demand"):
-        st.write(
-            "Maximum prices by persona: Student 1.00× reference; Local & "
-            "traditional 1.25×; Digital nomad 1.50×; Healthy & plant-based "
-            "1.75×; Tourist 2.00×. The limits include the exact boundary. "
-            "At or below reference price, a product gets twice the allocation "
-            "weight it gets above reference but within the persona's limit. "
-            "Affinity scores 0, 1, and 3 mean no interest, likes, and strong "
-            "preference. When whole visitors must be split, largest remainders "
-            "are assigned using the documented fixed persona and product order."
-        )
     st.caption(
         "Profit is not forecast before your final purchases and trading. "
         "Completed-day results, including profit and rent, appear on Dashboard."

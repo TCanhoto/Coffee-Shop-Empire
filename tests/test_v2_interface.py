@@ -216,6 +216,10 @@ def test_today_page_shows_compact_neutral_demand_explanation(tmp_path, monkeypat
 
     assert not app.exception
     assert any(item.value == expected for item in app.markdown)
+    assert not any(
+        "How persona prices affect demand" in str(item)
+        for item in app.get("expander")
+    )
     assert not any("Demand is deterministic:" in item.value for item in app.info)
 
 
