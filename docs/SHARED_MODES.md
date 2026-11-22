@@ -1,8 +1,10 @@
-# Campus Tycoon shared game modes
+# Coffee Shop Empire shared game modes
+
+The application was previously branded as Campus Tycoon. That name remains in older historical documents, database filenames, and internal identifiers for compatibility.
 
 ## Architecture
 
-Campus Tycoon 1.0 Single Player and Campus Tycoon 2.0 Multiplayer use one player-game implementation.
+Coffee Shop Empire 1.0 Single Player and Coffee Shop Empire 2.0 Multiplayer use one player-game implementation.
 
 - `app.py` offers the version selector and passes the selected mode to `v2_interface.render`.
 - `v2_interface.py` owns the shared café screens: location setup, menu, prices, purchases, trading, Dashboard, event notices, and final performance report.
@@ -50,7 +52,7 @@ Solo-mode tests cover immediate one-player session creation, validation, isolate
 ## Manual verification
 
 1. Run `uv sync`, then `uv run streamlit run app.py`.
-2. Select **Campus Tycoon 1.0 · Single Player**. Enter a name, starting cash, and seven trading days. Click **Start Solo Game**.
+2. Select **Coffee Shop Empire 1.0 · Single Player**. Enter a name, starting cash, and seven trading days. Click **Start Solo Game**.
 3. Save the one-time solo recovery code and credential. Sign a location lease, save a menu, buy stock, set prices, and complete days. Confirm the Dashboard, Day 3 event, Continue button, and final report.
 4. Refresh the browser and confirm the current café is still open with the same data. In a private/different browser, use **Solo Game** and the saved code, name, and credential to resume.
 5. Create a second solo game. Confirm the prompt before switching and verify the first game remains resumable.

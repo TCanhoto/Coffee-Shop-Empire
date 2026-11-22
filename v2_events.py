@@ -20,13 +20,15 @@ EVENTS_BY_LOCATION = {
     "chiado": (
         GameEvent(
             "chiado_vandalism", "chiado", "negative", "Protest and Vandalism",
-            "A protest and vandalism damaged stock at the Chiado café.",
+            "A protest in Chiado led to vandalism at your café. You lost "
+            "{lost_units} units of inventory.",
             "inventory_loss", 80,
         ),
         GameEvent(
             "chiado_christmas_lights", "chiado", "positive",
             "Christmas Lights in Chiado",
-            "The Christmas lights brought more potential visitors to Chiado.",
+            "The Christmas lights have brought extra visitors to Chiado! Your "
+            "café's potential demand increased by 25% today.",
             "demand_multiplier", 125,
         ),
     ),
@@ -34,13 +36,15 @@ EVENTS_BY_LOCATION = {
         GameEvent(
             "carcavelos_marathon", "carcavelos_nova_sbe", "negative",
             "Marathon Blocks the Marginal",
-            "The marathon blocked the Marginal and reduced potential visitors.",
+            "A marathon closed the Marginal road, keeping many customers away. "
+            "Your café's potential demand fell by 50% today.",
             "demand_multiplier", 50,
         ),
         GameEvent(
             "carcavelos_sunset_festival", "carcavelos_nova_sbe", "positive",
             "NOVA Sunset Festival",
-            "The NOVA Sunset Festival brought more potential visitors to campus.",
+            "A sunset festival at NOVA SBE has attracted more visitors to "
+            "Carcavelos! Your café's potential demand increased by 75% today.",
             "demand_multiplier", 175,
         ),
     ),
@@ -48,12 +52,14 @@ EVENTS_BY_LOCATION = {
         GameEvent(
             "belem_storm_charles", "belem", "negative",
             "Storm Charles",
-            "Storm Charles flooded the café and damaged stock.",
+            "Storm Charles flooded your café in Belém. You lost {lost_units} "
+            "units of inventory.",
             "inventory_loss", 60,
         ),
         GameEvent(
             "belem_concert", "belem", "positive", "Concert in Belém Gardens",
-            "A concert in Belém Gardens brought more potential visitors.",
+            "A concert in the gardens of Belém has brought more visitors to the "
+            "area! Your café's potential demand increased by 35% today.",
             "demand_multiplier", 135,
         ),
     ),
@@ -61,13 +67,15 @@ EVENTS_BY_LOCATION = {
         GameEvent(
             "principe_real_tuk_tuk", "principe_real", "negative",
             "Tuk-tuk Accident",
-            "A tuk-tuk crashed into the café and damaged stock.",
+            "A tuk-tuk crashed into your café in Príncipe Real, destroying "
+            "{lost_units} units of inventory.",
             "inventory_loss", 40,
         ),
         GameEvent(
             "principe_real_design_fair", "principe_real", "positive",
             "Príncipe Real Design & Creativity Fair",
-            "The Design & Creativity Fair brought more potential visitors.",
+            "A design and creativity fair has attracted more visitors to "
+            "Príncipe Real! Your café's potential demand increased by 55% today.",
             "demand_multiplier", 155,
         ),
     ),
@@ -78,6 +86,52 @@ EVENTS_BY_KEY = {
     for location_events in EVENTS_BY_LOCATION.values()
     for event in location_events
 }
+
+
+def format_event_message(event: Mapping[str, object]) -> str:
+    """Format the approved event message using the saved event outcome."""
+
+    key = event.get("key")
+    definition = EVENTS_BY_KEY.get(key) if isinstance(key, str) else None
+    if definition is None:
+        raise ValueError("The saved event is not recognized.")
+    if definition.effect != "inventory_loss":
+        return definition.explanation
+
+    outcome = event.get("outcome")
+    if not isinstance(outcome, Mapping):
+        raise ValueError("The saved event outcome is unavailable.")
+    lost_units = outcome.get("total_units_destroyed")
+    if type(lost_units) is not int or lost_units < 0:
+        destroyed = outcome.get("destroyed_quantities", [])
+        if not isinstance(destroyed, list):
+            raise ValueError("The saved inventory loss is invalid.")
+        lost_units = sum(
+            item.get("quantity", 0)
+            for item in destroyed
+            if isinstance(item, Mapping)
+            and type(item.get("quantity")) is int
+            and item["quantity"] >= 0
+        )
+    if lost_units == 0:
+        return {
+            "chiado_vandalism": (
+                "A protest in Chiado led to vandalism at your café. "
+                "Fortunately, you had no stock to lose."
+            ),
+            "belem_storm_charles": (
+                "Storm Charles flooded your café in Belém. "
+                "Fortunately, you had no stock to lose."
+            ),
+            "principe_real_tuk_tuk": (
+                "A tuk-tuk crashed into your café in Príncipe Real. "
+                "Fortunately, you had no stock to lose."
+            ),
+        }[definition.key]
+    message = definition.explanation.replace("{lost_units}", f"{lost_units:,}")
+    if lost_units == 1:
+        message = message.replace("1 units", "1 unit")
+    return message
 
 
 def choose_location_event(location_key: str, rng=random) -> GameEvent:

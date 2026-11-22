@@ -111,7 +111,7 @@ def test_three_concurrent_writers_preserve_player_balances(tmp_path, monkeypatch
         return game.trade_player_day(database, session["session_id"], pid, expected_day=1)
     with ThreadPoolExecutor(max_workers=3) as executor:
         results = list(executor.map(act, players))
-    for player, result, rent in zip(players, results, (3000, 8000, 5500)):
+    for player, result, rent in zip(players, results, (3000, 16500, 12500)):
         progress = game.get_player_progress(database, session["session_id"], player["player_id"])
         assert result["totals"]["revenue_cents"] == 900
         assert progress["cash_cents"] == 200_000 - 200 + 900 - rent

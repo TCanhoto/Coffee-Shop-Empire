@@ -15,7 +15,7 @@ import v2_interface
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
-V2_LABEL = "Campus Tycoon 2.0 · Multiplayer"
+V2_LABEL = "Coffee Shop Empire 2.0 · Multiplayer"
 
 
 def open_v2_app(monkeypatch, database):
@@ -194,6 +194,31 @@ def test_rendering_and_navigation_do_not_assign_or_reveal_events(tmp_path, monke
         assert connection.execute("SELECT COUNT(*) FROM player_day_events").fetchone()[0] == 0
 
 
+def test_today_page_shows_compact_neutral_demand_explanation(tmp_path, monkeypatch):
+    database = tmp_path / "today-demand-copy.sqlite3"
+    session = v2_storage.create_game_session(database)
+    player = v2_storage.join_game_session(database, session["join_code"], "Alex")
+    v2_storage.start_game_session(database, session["session_id"], session["host_credential"])
+    v2_storage.select_player_location(
+        database, session["session_id"], player["player_id"], "carcavelos_nova_sbe"
+    )
+
+    app = navigate(
+        resume_in_app(open_v2_app(monkeypatch, database), session, player), "Today"
+    )
+    expected = (
+        "How demand works: 10% of passers-by become potential customers. Their "
+        "preferences and your prices shape what they want to buy. Choose your "
+        "stock wisely: too little means missed sales, while too much leaves you "
+        "with unsold inventory. Customers won't switch to another product if "
+        "their preferred item is out of stock."
+    )
+
+    assert not app.exception
+    assert any(item.value == expected for item in app.markdown)
+    assert not any("Demand is deterministic:" in item.value for item in app.info)
+
+
 @pytest.mark.parametrize(
     ("location_key", "event_key", "polarity", "message_fragment", "effect"),
     [
@@ -201,14 +226,14 @@ def test_rendering_and_navigation_do_not_assign_or_reveal_events(tmp_path, monke
             "carcavelos_nova_sbe",
             "carcavelos_sunset_festival",
             "positive",
-            "potential demand has increased by 75%",
+            "A sunset festival at NOVA SBE has attracted more visitors to Carcavelos! Your café's potential demand increased by 75% today.",
             "demand_multiplier",
         ),
         (
             "belem",
             "belem_storm_charles",
             "negative",
-            "60% of your inventory has been destroyed (6 units)",
+            "Storm Charles flooded your café in Belém. You lost 6 units of inventory.",
             "inventory_loss",
         ),
     ],
@@ -252,6 +277,7 @@ def test_day_three_event_popup_shows_saved_effect_and_acknowledges_without_tradi
     )
     styled_alerts = app.success if polarity == "positive" else app.error
     assert any(message_fragment in item.value for item in styled_alerts)
+    assert any(message_fragment in item.value for item in app.markdown)
     assert any(item.label == "View Day 3 Results" for item in app.button)
 
     before_progress = v2_storage.get_player_progress(
@@ -264,6 +290,7 @@ def test_day_three_event_popup_shows_saved_effect_and_acknowledges_without_tradi
     app = click(app, "View Day 3 Results")
     assert not app.exception
     assert selected_section(app) == "Dashboard"
+    assert any(message_fragment in item.value for item in app.markdown)
     assert not any(item.label == "View Day 3 Results" for item in app.button)
     app.run()
     assert not any(item.label == "View Day 3 Results" for item in app.button)
@@ -601,6 +628,38 @@ def test_day_zero_shows_location_cards_but_hides_gameplay_until_lease_is_signed(
     )
     assert progress["location"]["location_key"] == "carcavelos_nova_sbe"
     assert not any("Day 0 — Choose your café location" in item.value for item in app.header)
+
+
+@pytest.mark.parametrize(
+    ("location_key", "rent_text"),
+    [
+        ("carcavelos_nova_sbe", "€30.00"),
+        ("principe_real", "€85.00"),
+        ("belem", "€125.00"),
+        ("chiado", "€165.00"),
+    ],
+)
+def test_new_rent_is_shown_on_each_location_card_and_lease_dialog(
+    tmp_path, monkeypatch, location_key, rent_text
+):
+    database = tmp_path / f"rent-ui-{location_key}.sqlite3"
+    session = v2_storage.create_game_session(database)
+    player = v2_storage.join_game_session(database, session["join_code"], "Alex")
+    v2_storage.start_game_session(database, session["session_id"], session["host_credential"])
+    app = navigate(
+        resume_in_app(open_v2_app(monkeypatch, database), session, player), "Café Setup"
+    )
+    assert rent_text in " ".join(item.value for item in app.markdown)
+    button = next(
+        item for item in app.button
+        if item.key == f"v2_choose_location_{player['player_id']}_{location_key}"
+    )
+    button.click()
+    app = app.run()
+    assert any(rent_text in item.value for item in app.markdown)
+    assert v2_storage.get_player_progress(
+        database, session["session_id"], player["player_id"]
+    )["location"] is None
 
 
 def test_location_dialog_refresh_repeated_sign_and_two_player_independence(

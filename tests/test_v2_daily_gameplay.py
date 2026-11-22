@@ -67,9 +67,9 @@ def test_rent_shortfall_ends_only_that_player_at_zero_cash(tmp_path, monkeypatch
         database, session["session_id"], player["player_id"], expected_day=1
     )
 
-    assert result["rent_due_cents"] == 8_000
+    assert result["rent_due_cents"] == 16_500
     assert result["rent_paid_cents"] == 1_000
-    assert result["rent_shortfall_cents"] == 7_000
+    assert result["rent_shortfall_cents"] == 15_500
     assert result["cash_cents_after"] == 0
     assert result["bankrupt"] is True
     progress = get_player_progress(database, session["session_id"], player["player_id"])
@@ -82,9 +82,9 @@ def test_rent_shortfall_ends_only_that_player_at_zero_cash(tmp_path, monkeypatch
         database, session["session_id"], player["player_id"]
     )
     assert len(history) == 1
-    assert history[0]["rent_due_cents"] == 8_000
+    assert history[0]["rent_due_cents"] == 16_500
     assert history[0]["rent_paid_cents"] == 1_000
-    assert history[0]["rent_shortfall_cents"] == 7_000
+    assert history[0]["rent_shortfall_cents"] == 15_500
     assert history[0]["bankrupt"] is True
 
     for action in (
@@ -151,7 +151,7 @@ def test_two_players_pay_their_own_location_rent_and_bankruptcy_is_isolated(tmp_
     )
 
     assert first_result["bankrupt"] is True
-    assert first_result["rent_due_cents"] == 8_000
+    assert first_result["rent_due_cents"] == 16_500
     assert second_result["bankrupt"] is False
     assert second_result["rent_due_cents"] == 3_000
     first_progress = get_player_progress(database, session["session_id"], first["player_id"])

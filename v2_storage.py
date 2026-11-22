@@ -180,6 +180,7 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                 session_id TEXT NOT NULL,
                 player_id TEXT NOT NULL,
                 location_key TEXT NOT NULL REFERENCES locations(location_key),
+                rent_per_day_cents INTEGER NOT NULL CHECK (rent_per_day_cents >= 0),
                 selected_at TEXT NOT NULL,
                 PRIMARY KEY (session_id, player_id),
                 FOREIGN KEY (session_id, player_id)
@@ -300,6 +301,18 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                 "ALTER TABLE game_sessions ADD COLUMN mode TEXT NOT NULL "
                 "DEFAULT 'multiplayer' CHECK (mode IN ('single_player', 'multiplayer'))"
             )
+        # Preserve each existing lease's old rent before the shared location
+        # catalogue is updated. New leases always store their own rent snapshot.
+        player_location_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(player_locations)")
+        }
+        rent_snapshot_needs_backfill = "rent_per_day_cents" not in player_location_columns
+        if rent_snapshot_needs_backfill:
+            connection.execute(
+                "ALTER TABLE player_locations ADD COLUMN rent_per_day_cents INTEGER "
+                "CHECK (rent_per_day_cents IS NULL OR rent_per_day_cents >= 0)"
+            )
         connection.executescript(
             """
             CREATE TRIGGER IF NOT EXISTS single_player_session_one_player
@@ -394,6 +407,16 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                          )
                      )"""
             )
+            if not rent_snapshot_needs_backfill:
+                rent_snapshot_needs_backfill = connection.execute(
+                    "SELECT 1 FROM player_locations WHERE rent_per_day_cents IS NULL LIMIT 1"
+                ).fetchone() is not None
+            if rent_snapshot_needs_backfill:
+                # The immutable-lease trigger is briefly suspended in this
+                # transaction so the additive migration can fill the snapshot.
+                connection.execute(
+                    "DROP TRIGGER IF EXISTS player_location_is_immutable"
+                )
             for location in LOCATIONS:
                 connection.execute(
                     """INSERT OR IGNORE INTO locations
@@ -409,6 +432,31 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                         location.rent_per_day_cents,
                         *location.persona_mix,
                     ),
+                )
+            # On older databases, the lease had no rent snapshot and the
+            # location table still contains its previously agreed rent here.
+            connection.execute(
+                """UPDATE player_locations
+                   SET rent_per_day_cents = (
+                       SELECT locations.rent_per_day_cents
+                       FROM locations
+                       WHERE locations.location_key = player_locations.location_key
+                   )
+                   WHERE rent_per_day_cents IS NULL"""
+            )
+            if rent_snapshot_needs_backfill:
+                connection.execute(
+                    """CREATE TRIGGER player_location_is_immutable
+                       BEFORE UPDATE ON player_locations
+                       BEGIN
+                           SELECT RAISE(ABORT, 'confirmed player location cannot be changed');
+                       END"""
+                )
+            # The catalogue is the authoritative rent for future leases.
+            for location in LOCATIONS:
+                connection.execute(
+                    "UPDATE locations SET rent_per_day_cents = ? WHERE location_key = ?",
+                    (location.rent_per_day_cents, location.key),
                 )
             for product in PRODUCT_CATALOGUE:
                 connection.execute(
@@ -1072,9 +1120,15 @@ def select_player_location(
                 raise ValueError("Choose a valid café location.")
             connection.execute(
                 """INSERT INTO player_locations
-                   (session_id, player_id, location_key, selected_at)
-                   VALUES (?, ?, ?, ?)""",
-                (session_id, player_id, location_key, _now_utc()),
+                   (session_id, player_id, location_key, rent_per_day_cents, selected_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    session_id,
+                    player_id,
+                    location_key,
+                    location["rent_per_day_cents"],
+                    _now_utc(),
+                ),
             )
     return _location_from_row(location)
 
@@ -1114,7 +1168,7 @@ def get_player_progress(
         ).fetchall()
         location_row = connection.execute(
             """SELECT l.location_key, l.name, l.description, l.passers_by_per_day,
-                      l.rent_per_day_cents, l.nomad_percentage, l.healthy_percentage,
+                      pl.rent_per_day_cents, l.nomad_percentage, l.healthy_percentage,
                       l.tourist_percentage, l.local_percentage, l.student_percentage
                FROM player_locations AS pl
                JOIN locations AS l ON l.location_key = pl.location_key
@@ -1373,7 +1427,7 @@ def trade_player_day(
                 )
             location_row = connection.execute(
                 """SELECT l.location_key, l.passers_by_per_day,
-                          l.rent_per_day_cents,
+                          pl.rent_per_day_cents,
                           l.nomad_percentage, l.healthy_percentage,
                           l.tourist_percentage, l.local_percentage, l.student_percentage
                    FROM player_locations AS pl

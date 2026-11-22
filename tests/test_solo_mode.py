@@ -284,15 +284,48 @@ def test_single_player_entry_offers_solo_start_and_resume_without_multiplayer_co
     app = open_app(monkeypatch, tmp_path / "solo-ui.sqlite3")
 
     assert not app.exception
+    app_source = Path(__file__).resolve().parents[1] / "app.py"
+    assert 'st.set_page_config(page_title="Coffee Shop Empire"' in app_source.read_text()
     assert app.radio[0].options == [
-        "Campus Tycoon 1.0 · Single Player",
-        "Campus Tycoon 2.0 · Multiplayer",
+        "Coffee Shop Empire 1.0 · Single Player",
+        "Coffee Shop Empire 2.0 · Multiplayer",
     ]
     assert any(item.value == "Single Player Game" for item in app.header)
+    assert app.title[0].value == "☕ Coffee Shop Empire"
+    assert "Campus Tycoon" not in app.title[0].value
+    assert any(item.value == (
+        "Welcome to Coffee Shop Empire! Choose a Lisbon neighbourhood, create "
+        "your menu, set your prices and manage your stock to build a thriving "
+        "café business."
+    ) for item in app.markdown)
+    assert any(item.value == (
+        "Take on Lisbon's café scene at your own pace. Make smart decisions, "
+        "grow your profits and see if you can become the city's next coffee "
+        "magnate. Watch out for unexpected events that could boost demand or "
+        "damage your stock. Have fun!"
+    ) for item in app.markdown)
     assert any(button.label == "Start Solo Game" for button in app.button)
     assert not any(button.label == "Create Game" for button in app.button)
     assert not any(button.label == "Join Game" for button in app.button)
     assert not any(item.value == "Multiplayer Leaderboard" for item in app.header)
+
+
+def test_multiplayer_entry_uses_new_brand_and_its_own_introduction(
+    tmp_path, monkeypatch
+):
+    app = open_app(monkeypatch, tmp_path / "multiplayer-ui.sqlite3")
+    app.sidebar.radio[0].set_value("Coffee Shop Empire 2.0 · Multiplayer").run()
+
+    assert not app.exception
+    assert app.title[0].value == "☕ Coffee Shop Empire"
+    assert "Campus Tycoon" not in app.title[0].value
+    assert any(item.value == (
+        "Challenge your friends to see who can build Lisbon's most successful "
+        "café! Compete on strategy, pricing and profit to become the city's "
+        "ultimate coffee magnate. But beware: unexpected events can boost "
+        "your demand or damage your stock. May the best entrepreneur win!"
+    ) for item in app.markdown)
+    assert not any("Take on Lisbon's café scene" in item.value for item in app.markdown)
 
 
 def test_switching_versions_keeps_solo_identity_and_navigation_separate(
@@ -305,14 +338,14 @@ def test_switching_versions_keeps_solo_identity_and_navigation_separate(
     solo_nav = next(item for item in app.sidebar.radio if item.label == "GAME SECTION")
     assert solo_nav.value == "Café Setup"
 
-    app.sidebar.radio[0].set_value("Campus Tycoon 2.0 · Multiplayer").run()
+    app.sidebar.radio[0].set_value("Coffee Shop Empire 2.0 · Multiplayer").run()
     multiplayer_nav = next(
         item for item in app.sidebar.radio if item.label == "GAME SECTION"
     )
     assert multiplayer_nav.options == ["Host / Join Game"]
     assert "v2_player" not in app.session_state
 
-    app.sidebar.radio[0].set_value("Campus Tycoon 1.0 · Single Player").run()
+    app.sidebar.radio[0].set_value("Coffee Shop Empire 1.0 · Single Player").run()
     solo_nav = next(item for item in app.sidebar.radio if item.label == "GAME SECTION")
     assert solo_nav.value == "Café Setup"
     assert app.session_state["solo_player"] == solo
@@ -368,7 +401,7 @@ def test_solo_creation_enters_shared_cafe_setup_and_can_be_resumed(
     assert progress["nickname"] == "Afonso's Café"
 
     reopened = open_app(monkeypatch, database)
-    reopened.radio[0].set_value("Campus Tycoon 1.0 · Single Player").run()
+    reopened.radio[0].set_value("Coffee Shop Empire 1.0 · Single Player").run()
     section = next(item for item in reopened.sidebar.radio if item.label == "GAME SECTION")
     section.set_value("Solo Game").run()
     assert any("Resume a saved solo game" in item.value for item in reopened.subheader)

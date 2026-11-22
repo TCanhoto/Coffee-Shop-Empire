@@ -6,6 +6,7 @@ import altair as alt
 import streamlit as st
 
 import v2_storage
+import v2_events
 from content import MAX_MENU_SIZE
 from business_logic import format_euros, price_to_cents
 from demand_engine import calculate_v2_demand
@@ -117,36 +118,13 @@ def _render_recorded_events(history: list[dict]) -> None:
                 st.success(label)
             else:
                 st.warning(label)
-            st.write(event["explanation"])
+            st.write(v2_events.format_event_message(event))
             st.caption(event["impact_summary"])
 
 
 def _day_three_event_message(event: dict) -> str:
     """Describe the saved and already-applied Day 3 consequence."""
-
-    outcome = event["outcome"]
-    if event["effect"] == "demand_multiplier":
-        direction = "increased" if event["polarity"] == "positive" else "decreased"
-        change_percent = (
-            event["effect_percent"] - 100
-            if event["polarity"] == "positive"
-            else 100 - event["effect_percent"]
-        )
-        before = outcome["potential_visitors_before"]
-        after = outcome["potential_visitors_after"]
-        return (
-            f"{event['name']} has happened and today's potential demand has "
-            f"{direction} by {change_percent}% "
-            f"({before:,} to {after:,} potential visitors)!"
-        )
-    units_destroyed = outcome.get(
-        "total_units_destroyed",
-        sum(item["quantity"] for item in outcome.get("destroyed_quantities", [])),
-    )
-    return (
-        f"{event['name']} has happened and {event['effect_percent']}% of your "
-        f"inventory has been destroyed ({units_destroyed:,} units)!"
-    )
+    return v2_events.format_event_message(event)
 
 
 @st.dialog("Day 3 location event", width="small", dismissible=False)
@@ -161,7 +139,6 @@ def _show_day_three_event_popup(
     else:
         st.subheader("Negative event!")
         st.error(_day_three_event_message(event), icon="⚠️")
-    st.write(event["explanation"])
     if st.button(
         "View Day 3 Results",
         type="primary",
@@ -705,13 +682,12 @@ def _show_player_cafe(
     active_menu_keys = [
         product["product_key"] for product in menu_products if product["is_active"]
     ]
-    st.info(
-        "Demand is deterministic: 10% of passers-by become potential visitors. "
-        "Each visitor can request one suitable drink. Persona preferences and "
-        "price limits split demand across your menu; a price above twice the "
-        "reference price gets no demand. Up to 60% of drink customers receive "
-        "one food opportunity. Sales cannot exceed stock, and customers do not "
-        "substitute when an item is unavailable."
+    st.markdown(
+        "How demand works: 10% of passers-by become potential customers. Their "
+        "preferences and your prices shape what they want to buy. Choose your "
+        "stock wisely: too little means missed sales, while too much leaves you "
+        "with unsold inventory. Customers won't switch to another product if "
+        "their preferred item is out of stock."
     )
     with st.expander("How persona prices affect demand"):
         st.write(
@@ -1504,11 +1480,28 @@ def render(mode: str = "multiplayer") -> None:
         unsafe_allow_html=True,
     )
     if mode == "single_player":
-        st.title("☕ Campus Tycoon 1.0 · Single Player")
-        st.caption("Build and run your own Lisbon café using the shared Campus Tycoon game engine.")
+        st.title("☕ Coffee Shop Empire")
     else:
-        st.title("☕ Campus Tycoon 2.0")
-        st.caption("A Lisbon café game. Plan your menu, serve your customers, grow your result.")
+        st.title("☕ Coffee Shop Empire")
+    st.markdown(
+        "Welcome to Coffee Shop Empire! Choose a Lisbon neighbourhood, create "
+        "your menu, set your prices and manage your stock to build a thriving "
+        "café business."
+    )
+    if mode == "single_player":
+        st.markdown(
+            "Take on Lisbon's café scene at your own pace. Make smart decisions, "
+            "grow your profits and see if you can become the city's next coffee "
+            "magnate. Watch out for unexpected events that could boost demand or "
+            "damage your stock. Have fun!"
+        )
+    else:
+        st.markdown(
+            "Challenge your friends to see who can build Lisbon's most successful "
+            "café! Compete on strategy, pricing and profit to become the city's "
+            "ultimate coffee magnate. But beware: unexpected events can boost "
+            "your demand or damage your stock. May the best entrepreneur win!"
+        )
 
     next_key, navigation_key = _navigation_keys(mode)
     saved_navigation_key = f"{mode}_saved_navigation"

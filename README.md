@@ -1,6 +1,6 @@
-# Campus Tycoon
+# Coffee Shop Empire
 
-A campus café simulation built with Python 3.12, Streamlit, and SQLite. Single Player and Multiplayer now use the same café gameplay, business rules, player screens, and database engine. Only the way a game is created and accessed differs.
+Coffee Shop Empire (formerly Campus Tycoon) is a Lisbon café management game built with Python 3.12, Streamlit, and SQLite. Single Player and Multiplayer use the same café gameplay, business rules, player screens, and database engine. Only the way a game is created and accessed differs.
 
 ## Requirements
 
@@ -18,9 +18,9 @@ uv run streamlit run app.py
 
 The new shared game database (`campus_tycoon_v2.sqlite3`) is created automatically in the project folder and kept when the application is restarted. It stores each game in a separate session and player identity. Single-player sessions start immediately with one player. Multiplayer sessions use a host, join code, waiting room, and independent players.
 
-To play alone, choose **Campus Tycoon 1.0 · Single Player**, enter the game length and starting cash, and start. The game opens directly at Day 0 location setup. Save the one-time solo recovery code and private credential so you can resume in another browser.
+To play alone, choose **Coffee Shop Empire 1.0 · Single Player**, enter the game length and starting cash, and start. The game opens directly at Day 0 location setup. Save the one-time solo recovery code and private credential so you can resume in another browser.
 
-To play with others, choose **Campus Tycoon 2.0 · Multiplayer**. The host creates a game and shares its six-character code and private host credential. Each player saves their one-time recovery credential. Once the host starts, players choose locations and manage their own cafés independently.
+To play with others, choose **Coffee Shop Empire 2.0 · Multiplayer**. The host creates a game and shares its six-character code and private host credential. Each player saves their one-time recovery credential. Once the host starts, players choose locations and manage their own cafés independently.
 
 Both modes use the same 12-product catalogue, five-product menu limit, deterministic persona demand, rent, events, dashboard, and final report. Daily rent is charged once after sales; if cash cannot cover it, the remaining cash is applied, the shortfall is forgiven, and that player's game ends at €0. The final score is final cash minus starting cash, with no recovery value for unsold stock. The Multiplayer mode also has a session leaderboard.
 

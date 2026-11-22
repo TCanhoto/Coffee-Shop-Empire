@@ -160,7 +160,7 @@ uv run pytest tests/test_v2_storage.py
 
 ## Manual Phase 1B walkthrough
 
-1. Launch with `uv run streamlit run app.py` and choose **Campus Tycoon 2.0 · Multiplayer** in the left version selector.
+1. Launch with `uv run streamlit run app.py` and choose **Coffee Shop Empire 2.0 · Multiplayer** in the left version selector.
 2. Under **Host Game**, create a session using defaults or values from the allowed ranges. Save both the six-character code and the private host credential.
 3. In another browser or private window, choose **Join Game**, enter the code and a nickname, and save the one-time recovery credential.
 4. Confirm the nickname appears in the host waiting room. The host selects **Start Game**, and the player should move automatically to Café Setup.

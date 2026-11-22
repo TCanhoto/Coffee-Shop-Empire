@@ -54,6 +54,45 @@ def test_all_eight_location_events_have_the_approved_names_and_effects():
     }
 
 
+@pytest.mark.parametrize(
+    ("event_key", "outcome", "expected"),
+    [
+        ("chiado_christmas_lights", {}, "The Christmas lights have brought extra visitors to Chiado! Your café's potential demand increased by 25% today."),
+        ("chiado_vandalism", {"total_units_destroyed": 12}, "A protest in Chiado led to vandalism at your café. You lost 12 units of inventory."),
+        ("chiado_vandalism", {"total_units_destroyed": 1}, "A protest in Chiado led to vandalism at your café. You lost 1 unit of inventory."),
+        ("chiado_vandalism", {"total_units_destroyed": 0}, "A protest in Chiado led to vandalism at your café. Fortunately, you had no stock to lose."),
+        ("carcavelos_sunset_festival", {}, "A sunset festival at NOVA SBE has attracted more visitors to Carcavelos! Your café's potential demand increased by 75% today."),
+        ("carcavelos_marathon", {}, "A marathon closed the Marginal road, keeping many customers away. Your café's potential demand fell by 50% today."),
+        ("belem_concert", {}, "A concert in the gardens of Belém has brought more visitors to the area! Your café's potential demand increased by 35% today."),
+        ("belem_storm_charles", {"total_units_destroyed": 7}, "Storm Charles flooded your café in Belém. You lost 7 units of inventory."),
+        ("principe_real_design_fair", {}, "A design and creativity fair has attracted more visitors to Príncipe Real! Your café's potential demand increased by 55% today."),
+        ("principe_real_tuk_tuk", {"total_units_destroyed": 2}, "A tuk-tuk crashed into your café in Príncipe Real, destroying 2 units of inventory."),
+    ],
+)
+def test_event_messages_use_approved_templates_and_saved_loss_counts(
+    event_key, outcome, expected
+):
+    assert v2_events.format_event_message({"key": event_key, "outcome": outcome}) == expected
+
+
+@pytest.mark.parametrize(
+    ("event_key", "expected"),
+    [
+        ("chiado_vandalism", "A protest in Chiado led to vandalism at your café. You lost 3 units of inventory."),
+        ("belem_storm_charles", "Storm Charles flooded your café in Belém. You lost 3 units of inventory."),
+        ("principe_real_tuk_tuk", "A tuk-tuk crashed into your café in Príncipe Real, destroying 3 units of inventory."),
+    ],
+)
+def test_each_inventory_event_uses_actual_saved_destroyed_units(event_key, expected):
+    assert v2_events.format_event_message(
+        {"key": event_key, "outcome": {"total_units_destroyed": 99}}
+    ).find("99 units") >= 0
+    assert v2_events.format_event_message({
+        "key": event_key,
+        "outcome": {"destroyed_quantities": [{"quantity": 1}, {"quantity": 2}]},
+    }) == expected
+
+
 @pytest.mark.parametrize("location_key", tuple(EVENTS_BY_LOCATION))
 def test_positive_and_negative_events_each_have_a_fifty_percent_choice(location_key):
     negative = v2_events.choose_location_event(location_key, rng=FixedChoice(0))

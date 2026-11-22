@@ -44,9 +44,9 @@ class Location:
 # interface deliberately shows only the location's traffic and rent.
 LOCATIONS = (
     Location("carcavelos_nova_sbe", "Carcavelos / Nova SBE", "A campus location with a strong student presence.", 1200, 3000, (20, 15, 5, 10, 50)),
-    Location("chiado", "Chiado", "A busy central district popular with shoppers and visitors.", 3000, 8000, (15, 15, 45, 15, 10)),
-    Location("principe_real", "Príncipe Real", "A lively neighbourhood with residents and café visitors.", 1500, 6000, (30, 35, 20, 10, 5)),
-    Location("belem", "Belém", "A historic riverside area that attracts many visitors.", 2500, 5500, (5, 10, 60, 25, 0)),
+    Location("chiado", "Chiado", "A busy central district popular with shoppers and visitors.", 3000, 16500, (15, 15, 45, 15, 10)),
+    Location("principe_real", "Príncipe Real", "A lively neighbourhood with residents and café visitors.", 1500, 8500, (30, 35, 20, 10, 5)),
+    Location("belem", "Belém", "A historic riverside area that attracts many visitors.", 2500, 12500, (5, 10, 60, 25, 0)),
 )
 
 STARTING_CASH_CENTS = 10_000

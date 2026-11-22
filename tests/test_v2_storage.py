@@ -314,9 +314,9 @@ def test_fixed_lisbon_location_data_and_persona_mix_totals(tmp_path):
         for location in locations
     ] == [
         ("Carcavelos / Nova SBE", 1200, 3000, (20, 15, 5, 10, 50)),
-        ("Chiado", 3000, 8000, (15, 15, 45, 15, 10)),
-        ("Príncipe Real", 1500, 6000, (30, 35, 20, 10, 5)),
-        ("Belém", 2500, 5500, (5, 10, 60, 25, 0)),
+        ("Chiado", 3000, 16500, (15, 15, 45, 15, 10)),
+        ("Príncipe Real", 1500, 8500, (30, 35, 20, 10, 5)),
+        ("Belém", 2500, 12500, (5, 10, 60, 25, 0)),
     ]
     assert all(sum(location["persona_mix"]) == 100 for location in locations)
 
