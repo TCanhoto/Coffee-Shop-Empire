@@ -3,12 +3,14 @@
 from pathlib import Path
 import sqlite3
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from business_logic import format_euros
 from demand_engine import calculate_v2_demand
 from estimate_ranges import demand_estimate_range
 import v2_storage
+import v2_events
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -27,8 +29,16 @@ def click(app, label):
     return app.run()
 
 
+def section_widget(app):
+    return next(item for item in app.sidebar.selectbox if item.label == "Game section")
+
+
+def selected_section(app):
+    return section_widget(app).value
+
+
 def navigate(app, section):
-    app.selectbox[0].set_value(section)
+    section_widget(app).set_value(section)
     return app.run()
 
 
@@ -57,6 +67,31 @@ def test_host_creates_once_and_reruns_do_not_duplicate_sessions(tmp_path, monkey
     app.run()
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM game_sessions").fetchone()[0] == 1
+
+
+def test_game_section_is_in_sidebar_below_version_selector_without_main_duplicate(
+    tmp_path, monkeypatch
+):
+    app = open_v2_app(monkeypatch, tmp_path / "sidebar-navigation.sqlite3")
+
+    assert app.sidebar.radio[0].label == "Game version"
+    assert app.sidebar.selectbox[0].label == "Game section"
+    assert app.sidebar.selectbox[0].key == "v2_main_navigation"
+    assert len(app.sidebar.selectbox) == 1
+    assert len(app.main.selectbox) == 0
+    assert app.sidebar.selectbox[0].options == [
+        "Host / Join Game",
+        "Café Setup",
+        "Today",
+        "Dashboard",
+        "Leaderboard",
+        "Final Report",
+    ]
+
+    for destination in app.sidebar.selectbox[0].options:
+        app = navigate(app, destination)
+        assert not app.exception
+        assert selected_section(app) == destination
 
 
 def test_join_rejects_invalid_code_and_successful_reruns_do_not_duplicate_player(
@@ -130,9 +165,91 @@ def test_rendering_and_navigation_do_not_assign_or_reveal_events(tmp_path, monke
     app = navigate(app, "Today")
     assert not app.exception
     assert not any("Location events" in item.value for item in app.subheader)
+    assert not any("event has happened" in item.value for item in app.success)
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM session_event_plans").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM player_day_events").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("location_key", "event_key", "polarity", "message_fragment", "effect"),
+    [
+        (
+            "carcavelos_nova_sbe",
+            "carcavelos_sunset_festival",
+            "positive",
+            "potential demand has increased by 75%",
+            "demand_multiplier",
+        ),
+        (
+            "belem",
+            "belem_storm_charles",
+            "negative",
+            "60% of your inventory has been destroyed (6 units)",
+            "inventory_loss",
+        ),
+    ],
+)
+def test_day_three_event_popup_shows_saved_effect_and_acknowledges_without_trading(
+    tmp_path, monkeypatch, location_key, event_key, polarity, message_fragment, effect
+):
+    database = tmp_path / f"popup-{event_key}.sqlite3"
+    session = v2_storage.create_game_session(database, trading_days=4)
+    player = v2_storage.join_game_session(database, session["join_code"], "Alex")
+    v2_storage.start_game_session(database, session["session_id"], session["host_credential"])
+    v2_storage.select_player_location(
+        database, session["session_id"], player["player_id"], location_key
+    )
+    v2_storage.trade_player_day(database, session["session_id"], player["player_id"], 1)
+    v2_storage.trade_player_day(database, session["session_id"], player["player_id"], 2)
+    if effect == "inventory_loss":
+        for key, quantity in (("bica", 5), ("galao", 5)):
+            v2_storage.purchase_player_stock(
+                database, session["session_id"], player["player_id"], key, quantity
+            )
+    monkeypatch.setattr(
+        v2_events,
+        "choose_location_event",
+        lambda location: v2_events.EVENTS_BY_KEY[event_key],
+    )
+
+    app = resume_in_app(open_v2_app(monkeypatch, database), session, player)
+    app = navigate(app, "Today")
+    app = click(app, "Complete Day 3")
+    assert not any("Positive event!" == item.value for item in app.subheader)
+    assert not any("Negative event!" == item.value for item in app.subheader)
+    app = click(app, "Confirm Complete Day")
+
+    assert not app.exception
+    assert selected_section(app) == "Dashboard"
+    assert any(item.value == "Day 3 results" for item in app.subheader)
+    assert any(
+        item.value == ("Positive event!" if polarity == "positive" else "Negative event!")
+        for item in app.subheader
+    )
+    styled_alerts = app.success if polarity == "positive" else app.error
+    assert any(message_fragment in item.value for item in styled_alerts)
+    assert any(item.label == "View Day 3 Results" for item in app.button)
+
+    before_progress = v2_storage.get_player_progress(
+        database, session["session_id"], player["player_id"]
+    )
+    before_history = v2_storage.load_player_trade_history(
+        database, session["session_id"], player["player_id"]
+    )
+    assert [day["day"] for day in before_history if day["event"]] == [3]
+    app = click(app, "View Day 3 Results")
+    assert not app.exception
+    assert selected_section(app) == "Dashboard"
+    assert not any(item.label == "View Day 3 Results" for item in app.button)
+    app.run()
+    assert not any(item.label == "View Day 3 Results" for item in app.button)
+    assert v2_storage.get_player_progress(
+        database, session["session_id"], player["player_id"]
+    ) == before_progress
+    assert v2_storage.load_player_trade_history(
+        database, session["session_id"], player["player_id"]
+    ) == before_history
 
 
 def test_active_player_can_buy_set_price_and_complete_day_once(tmp_path, monkeypatch):
@@ -179,7 +296,7 @@ def test_active_player_can_buy_set_price_and_complete_day_once(tmp_path, monkeyp
     )) == 0
     app = click(app, "Confirm Complete Day")
     assert not app.exception
-    assert app.selectbox[0].value == "Dashboard"
+    assert selected_section(app) == "Dashboard"
     assert any(item.value == "Day 1 results" for item in app.subheader)
     assert any("Rent:" in item.value for item in app.caption)
 
@@ -194,13 +311,9 @@ def test_active_player_can_buy_set_price_and_complete_day_once(tmp_path, monkeyp
     assert coffee["selected_price_cents"] == 120
     assert len(history) == 1
     assert history[0]["day"] == 1
-    assert history[0]["event"] is not None
-    event_name = history[0]["event"]["name"]
-    assert any(
-        event_name in item.value for item in list(app.success) + list(app.warning)
-    )
+    assert history[0]["event"] is None
     app = click(app, "Continue to Day 2")
-    assert app.selectbox[0].value == "Today"
+    assert selected_section(app) == "Today"
     assert any(button.label == "Complete Day 2" for button in app.button)
     assert v2_storage.get_player_progress(
         database, session["session_id"], player["player_id"]
@@ -494,7 +607,7 @@ def test_player_can_edit_menu_and_only_active_products_have_actions(tmp_path, mo
         "pastel_de_nata",
         "brownie",
     }
-    assert app.selectbox[0].value == "Today"
+    assert selected_section(app) == "Today"
     assert any("menu was saved" in toast.proto.body for toast in app.get("toast"))
     assert progress["current_day"] == 1
     app = navigate(app, "Café Setup")
@@ -737,15 +850,16 @@ def test_host_start_routes_waiting_players_and_resume_recovers_saved_day(tmp_pat
         del app.session_state["v2_waiting_player"]
         app.run()
         assert not app.exception
-        assert app.selectbox[0].value == "Café Setup"
-    assert casey_app.run().selectbox[0].value == "Host / Join Game"
+        assert selected_section(app) == "Café Setup"
+    casey_app.run()
+    assert selected_section(casey_app) == "Host / Join Game"
 
     v2_storage.select_player_location(
         database, session["session_id"], alex["player_id"], "carcavelos_nova_sbe"
     )
     v2_storage.trade_player_day(database, session["session_id"], alex["player_id"], 1)
     resumed = resume_in_app(open_v2_app(monkeypatch, database), session, alex)
-    assert resumed.selectbox[0].value == "Dashboard"
+    assert selected_section(resumed) == "Dashboard"
     assert any(item.value == "Day 1 results" for item in resumed.subheader)
     assert len(v2_storage.load_player_trade_history(
         database, session["session_id"], alex["player_id"]
@@ -764,7 +878,7 @@ def test_failed_menu_and_trade_keep_current_section(tmp_path, monkeypatch):
     app = navigate(app, "Café Setup")
     app.multiselect[0].set_value(["pastel_de_nata"]).run()
     app = click(app, "Save menu")
-    assert app.selectbox[0].value == "Café Setup"
+    assert selected_section(app) == "Café Setup"
     assert any("at least one drink" in message.value for message in app.error)
 
     app = navigate(app, "Today")
@@ -775,7 +889,7 @@ def test_failed_menu_and_trade_keep_current_section(tmp_path, monkeypatch):
 
         patch.setattr(v2_storage, "trade_player_day", reject_trade)
         app = click(app, "Confirm Complete Day")
-    assert app.selectbox[0].value == "Today"
+    assert selected_section(app) == "Today"
     assert any("Trade failed." in message.value for message in app.error)
     assert v2_storage.load_player_trade_history(
         database, session["session_id"], player["player_id"]
@@ -783,9 +897,10 @@ def test_failed_menu_and_trade_keep_current_section(tmp_path, monkeypatch):
 
     app = click(app, "Complete Day 1")
     app = click(app, "Confirm Complete Day")
-    assert app.selectbox[0].value == "Dashboard"
+    assert selected_section(app) == "Dashboard"
     assert not any(button.label.startswith("Continue to Day") for button in app.button)
-    assert click(app, "View Final Report").selectbox[0].value == "Final Report"
+    app = click(app, "View Final Report")
+    assert selected_section(app) == "Final Report"
 
 
 def test_purchase_form_submits_only_the_selected_product(tmp_path, monkeypatch):

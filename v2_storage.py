@@ -11,7 +11,6 @@ import hashlib
 import hmac
 import json
 from pathlib import Path
-import random
 import secrets
 import sqlite3
 import uuid
@@ -234,6 +233,8 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                     REFERENCES player_inventory(session_id, player_id, product_key)
             );
 
+            -- Legacy metadata retained so existing V2 databases need no table
+            -- rebuild. Day 3 rules do not read or write session-wide plans.
             CREATE TABLE IF NOT EXISTS session_event_plans (
                 session_id TEXT PRIMARY KEY REFERENCES game_sessions(session_id)
                     ON DELETE CASCADE,
@@ -259,6 +260,7 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                 outcome_json TEXT,
                 created_at TEXT NOT NULL,
                 occurred_at TEXT,
+                popup_acknowledged_at TEXT,
                 PRIMARY KEY (session_id, player_id, day_number),
                 FOREIGN KEY (session_id, player_id)
                     REFERENCES players(session_id, player_id) ON DELETE CASCADE,
@@ -332,7 +334,45 @@ def initialize_v2_database(database_path: str | Path = V2_DATABASE_PATH) -> None
                 "ALTER TABLE player_trading_days "
                 "ADD COLUMN served_customers_by_persona_json TEXT"
             )
+        event_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(player_day_events)")
+        }
+        added_popup_acknowledgement = "popup_acknowledged_at" not in event_columns
+        if added_popup_acknowledgement:
+            connection.execute(
+                "ALTER TABLE player_day_events ADD COLUMN popup_acknowledged_at TEXT"
+            )
         with connection:
+            if added_popup_acknowledgement:
+                # Existing completed Day 3 records are historical. Do not show
+                # the newly introduced popup as if the old trade just happened.
+                connection.execute(
+                    """UPDATE player_day_events
+                       SET popup_acknowledged_at = COALESCE(occurred_at, created_at)
+                       WHERE day_number = 3 AND status = 'occurred'"""
+                )
+            # Earlier event versions could schedule effects on arbitrary days.
+            # Discard only unapplied schedules outside Day 3, and schedules for
+            # games/players that have already passed Day 3. Saved outcomes and
+            # completed trading records are never changed.
+            connection.execute(
+                """DELETE FROM player_day_events
+                   WHERE status = 'scheduled'
+                     AND (
+                         day_number <> 3
+                         OR EXISTS (
+                             SELECT 1 FROM game_sessions AS s
+                             WHERE s.session_id = player_day_events.session_id
+                               AND s.trading_days < 3
+                         )
+                         OR EXISTS (
+                             SELECT 1 FROM player_trading_days AS d
+                             WHERE d.session_id = player_day_events.session_id
+                               AND d.player_id = player_day_events.player_id
+                               AND d.day_number = 3
+                         )
+                     )"""
+            )
             for location in LOCATIONS:
                 connection.execute(
                     """INSERT OR IGNORE INTO locations
@@ -794,77 +834,6 @@ def _location_from_row(row: sqlite3.Row) -> dict:
     return location
 
 
-def _future_event_slots(
-    connection: sqlite3.Connection,
-    session_id: str,
-    current_player_id: str,
-    current_day: int,
-) -> list[dict]:
-    """Return eligible player-days after the day being completed now."""
-
-    players = connection.execute(
-        """SELECT p.player_id, p.current_day, p.is_bankrupt, s.trading_days,
-                  l.location_key
-           FROM players AS p
-           JOIN game_sessions AS s ON s.session_id = p.session_id
-           JOIN player_locations AS pl
-             ON pl.session_id = p.session_id AND pl.player_id = p.player_id
-           JOIN locations AS l ON l.location_key = pl.location_key
-           WHERE p.session_id = ? AND p.is_bankrupt = 0
-             AND p.current_day <= s.trading_days""",
-        (session_id,),
-    ).fetchall()
-    slots = []
-    for player in players:
-        for day_number in range(player["current_day"], player["trading_days"] + 1):
-            if player["player_id"] == current_player_id and day_number == current_day:
-                continue
-            already_assigned = connection.execute(
-                """SELECT 1 FROM player_day_events
-                   WHERE session_id = ? AND player_id = ? AND day_number = ?""",
-                (session_id, player["player_id"], day_number),
-            ).fetchone()
-            if already_assigned is None:
-                slots.append(
-                    {
-                        "player_id": player["player_id"],
-                        "day_number": day_number,
-                        "location_key": player["location_key"],
-                    }
-                )
-    return slots
-
-
-def _insert_event_assignment(
-    connection: sqlite3.Connection,
-    session_id: str,
-    player_id: str,
-    day_number: int,
-    location_key: str,
-) -> None:
-    event = v2_events.choose_location_event(location_key)
-    connection.execute(
-        """INSERT INTO player_day_events
-           (session_id, player_id, day_number, event_key, event_name, polarity,
-            location_key, explanation, effect, effect_percent, status,
-            outcome_json, created_at, occurred_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', NULL, ?, NULL)""",
-        (
-            session_id,
-            player_id,
-            day_number,
-            event.key,
-            event.name,
-            event.polarity,
-            event.location_key,
-            event.explanation,
-            event.effect,
-            event.percent,
-            _now_utc(),
-        ),
-    )
-
-
 def _get_or_create_session_event(
     connection: sqlite3.Connection,
     session_id: str,
@@ -872,34 +841,21 @@ def _get_or_create_session_event(
     day_number: int,
     location_key: str,
 ) -> tuple[sqlite3.Row | None, v2_events.GameEvent | None]:
-    """Persist one session plan and return this day's event, if assigned."""
+    """Return or create this player's event, only while trading Day 3.
 
-    plan = connection.execute(
-        "SELECT planned_event_count FROM session_event_plans WHERE session_id = ?",
+    Selection happens inside the caller's ``BEGIN IMMEDIATE`` transaction.
+    It is therefore committed together with sales and cannot be rerolled by a
+    refresh or a competing submission.
+    """
+
+    if day_number != 3:
+        return None, None
+    session = connection.execute(
+        "SELECT trading_days FROM game_sessions WHERE session_id = ?",
         (session_id,),
     ).fetchone()
-    if plan is None:
-        future_slots = _future_event_slots(
-            connection, session_id, player_id, day_number
-        )
-        event_count = v2_events.choose_event_count(bool(future_slots))
-        connection.execute(
-            """INSERT INTO session_event_plans
-               (session_id, planned_event_count, created_at) VALUES (?, ?, ?)""",
-            (session_id, event_count, _now_utc()),
-        )
-        _insert_event_assignment(
-            connection, session_id, player_id, day_number, location_key
-        )
-        if event_count == 2:
-            target = random.choice(future_slots)
-            _insert_event_assignment(
-                connection,
-                session_id,
-                target["player_id"],
-                target["day_number"],
-                target["location_key"],
-            )
+    if session is None or session["trading_days"] < 3:
+        return None, None
 
     assignment = connection.execute(
         """SELECT * FROM player_day_events
@@ -907,7 +863,31 @@ def _get_or_create_session_event(
         (session_id, player_id, day_number),
     ).fetchone()
     if assignment is None:
-        return None, None
+        event = v2_events.choose_location_event(location_key)
+        connection.execute(
+            """INSERT INTO player_day_events
+               (session_id, player_id, day_number, event_key, event_name,
+                polarity, location_key, explanation, effect, effect_percent,
+                status, outcome_json, created_at, occurred_at)
+               VALUES (?, ?, 3, ?, ?, ?, ?, ?, ?, ?, 'scheduled', NULL, ?, NULL)""",
+            (
+                session_id,
+                player_id,
+                event.key,
+                event.name,
+                event.polarity,
+                event.location_key,
+                event.explanation,
+                event.effect,
+                event.percent,
+                _now_utc(),
+            ),
+        )
+        assignment = connection.execute(
+            """SELECT * FROM player_day_events
+               WHERE session_id = ? AND player_id = ? AND day_number = 3""",
+            (session_id, player_id),
+        ).fetchone()
     if assignment["status"] != "scheduled":
         raise ValueError("This day's event has already been processed.")
     try:
@@ -1256,15 +1236,16 @@ def trade_player_day(
             location = _location_from_row(location_row)
             product_rows = connection.execute(
                 """SELECT p.product_key, p.name, p.purchase_cost_cents,
-                          p.reference_price_cents, i.quantity, i.selected_price_cents
-                          , p.is_drink
+                          p.reference_price_cents, i.quantity, i.selected_price_cents,
+                          p.is_drink,
+                          CASE WHEN m.product_key IS NULL THEN 0 ELSE 1 END AS is_active
                    FROM player_inventory AS i
                    JOIN products AS p ON p.product_key = i.product_key
-                   JOIN player_menu AS m
+                   LEFT JOIN player_menu AS m
                      ON m.session_id = i.session_id AND m.player_id = i.player_id
                     AND m.product_key = i.product_key
                    WHERE i.session_id = ? AND i.player_id = ?
-                   ORDER BY p.product_key""",
+                   ORDER BY p.rowid""",
                 (session_id, player_id),
             ).fetchall()
             products = [
@@ -1276,6 +1257,7 @@ def trade_player_day(
                     "quantity": row["quantity"],
                     "selected_price_cents": row["selected_price_cents"],
                     "is_drink": bool(row["is_drink"]),
+                    "is_active": bool(row["is_active"]),
                 }
                 for row in product_rows
             ]
@@ -1286,11 +1268,16 @@ def trade_player_day(
             event_record = None
             event_outcome = None
             trade_location = location
-            trade_products = products
+            trade_products = [product for product in products if product["is_active"]]
+            event_adjusted_products = products
             if event is not None:
-                trade_location, trade_products, event_outcome = v2_events.apply_event(
+                trade_location, event_adjusted_products, event_outcome = v2_events.apply_event(
                     event, location, products
                 )
+                trade_products = [
+                    product for product in event_adjusted_products
+                    if product["is_active"]
+                ]
             result = calculate_v2_trade(
                 player["cash_cents"], trade_location, trade_products
             )
@@ -1389,6 +1376,24 @@ def trade_player_day(
                     ),
                 )
 
+            if event is not None and event.effect == "inventory_loss":
+                # Event effects apply to all owned stock, including products
+                # temporarily removed from the active menu. Sales only use the
+                # active menu, so persist loss for off-menu rows separately.
+                for product in event_adjusted_products:
+                    if product["is_active"]:
+                        continue
+                    connection.execute(
+                        """UPDATE player_inventory SET quantity = ?
+                           WHERE session_id = ? AND player_id = ? AND product_key = ?""",
+                        (
+                            product["quantity"],
+                            session_id,
+                            player_id,
+                            product["product_key"],
+                        ),
+                    )
+
             new_day = day_number + 1
             connection.execute(
                 """UPDATE players SET cash_cents = ?, current_day = ?, is_bankrupt = ?
@@ -1436,6 +1441,56 @@ def trade_player_day(
         "served_customers_by_persona": result["served_customers_by_persona"],
         "event": event_record,
     }
+
+
+def load_pending_day_three_event_popup(
+    database_path: str | Path, session_id: str, player_id: str
+) -> dict | None:
+    """Load this player's saved Day 3 event until its popup is acknowledged."""
+
+    initialize_v2_database(database_path)
+    with _connect(database_path) as connection:
+        row = connection.execute(
+            """SELECT event_key, event_name, polarity, location_key, explanation,
+                      effect, effect_percent, outcome_json
+               FROM player_day_events
+               WHERE session_id = ? AND player_id = ? AND day_number = 3
+                 AND status = 'occurred' AND popup_acknowledged_at IS NULL""",
+            (session_id, player_id),
+        ).fetchone()
+    if row is None:
+        return None
+    outcome = json.loads(row["outcome_json"])
+    return {
+        "key": row["event_key"],
+        "name": row["event_name"],
+        "polarity": row["polarity"],
+        "location_key": row["location_key"],
+        "explanation": row["explanation"],
+        "effect": row["effect"],
+        "effect_percent": row["effect_percent"],
+        "outcome": outcome,
+        "impact_summary": outcome["impact_summary"],
+    }
+
+
+def acknowledge_day_three_event_popup(
+    database_path: str | Path, session_id: str, player_id: str
+) -> bool:
+    """Acknowledge the saved Day 3 popup without changing game balances."""
+
+    initialize_v2_database(database_path)
+    with _connect(database_path) as connection:
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                """UPDATE player_day_events
+                   SET popup_acknowledged_at = ?
+                   WHERE session_id = ? AND player_id = ? AND day_number = 3
+                     AND status = 'occurred' AND popup_acknowledged_at IS NULL""",
+                (_now_utc(), session_id, player_id),
+            )
+            return updated.rowcount == 1
 
 
 def load_player_trade_history(

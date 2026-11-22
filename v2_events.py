@@ -19,7 +19,7 @@ class GameEvent:
 EVENTS_BY_LOCATION = {
     "chiado": (
         GameEvent(
-            "chiado_vandalism", "chiado", "negative", "Protest and vandalism",
+            "chiado_vandalism", "chiado", "negative", "Protest and Vandalism",
             "A protest and vandalism damaged stock at the Chiado café.",
             "inventory_loss", 80,
         ),
@@ -33,7 +33,7 @@ EVENTS_BY_LOCATION = {
     "carcavelos_nova_sbe": (
         GameEvent(
             "carcavelos_marathon", "carcavelos_nova_sbe", "negative",
-            "Marathon blocks the Marginal",
+            "Marathon Blocks the Marginal",
             "The marathon blocked the Marginal and reduced potential visitors.",
             "demand_multiplier", 50,
         ),
@@ -47,7 +47,7 @@ EVENTS_BY_LOCATION = {
     "belem": (
         GameEvent(
             "belem_storm_charles", "belem", "negative",
-            "Storm Charles floods the café",
+            "Storm Charles",
             "Storm Charles flooded the café and damaged stock.",
             "inventory_loss", 60,
         ),
@@ -60,7 +60,7 @@ EVENTS_BY_LOCATION = {
     "principe_real": (
         GameEvent(
             "principe_real_tuk_tuk", "principe_real", "negative",
-            "Tuk-tuk crashes into the café",
+            "Tuk-tuk Accident",
             "A tuk-tuk crashed into the café and damaged stock.",
             "inventory_loss", 40,
         ),
@@ -78,12 +78,6 @@ EVENTS_BY_KEY = {
     for location_events in EVENTS_BY_LOCATION.values()
     for event in location_events
 }
-
-
-def choose_event_count(has_future_player_day: bool, rng=random) -> int:
-    """Choose one or two session events equally when another day is available."""
-
-    return rng.choice((1, 2)) if has_future_player_day else 1
 
 
 def choose_location_event(location_key: str, rng=random) -> GameEvent:
@@ -117,6 +111,7 @@ def apply_event(
     updated_products = [dict(product) for product in products]
     outcome = {
         "destroyed_quantities": [],
+        "total_units_destroyed": 0,
         "potential_visitors_before": None,
         "potential_visitors_after": None,
         "impact_summary": "",
@@ -141,6 +136,7 @@ def apply_event(
             product["quantity"] = quantity - lost
         outcome["destroyed_quantities"] = destroyed
         total_lost = sum(item["quantity"] for item in destroyed)
+        outcome["total_units_destroyed"] = total_lost
         if total_lost:
             detail = ", ".join(
                 f"{item['name']} ({item['quantity']})" for item in destroyed

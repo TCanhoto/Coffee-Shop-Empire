@@ -61,6 +61,63 @@ def _render_recorded_events(history: list[dict]) -> None:
             st.caption(event["impact_summary"])
 
 
+def _day_three_event_message(event: dict) -> str:
+    """Describe the saved and already-applied Day 3 consequence."""
+
+    outcome = event["outcome"]
+    if event["effect"] == "demand_multiplier":
+        direction = "increased" if event["polarity"] == "positive" else "decreased"
+        change_percent = (
+            event["effect_percent"] - 100
+            if event["polarity"] == "positive"
+            else 100 - event["effect_percent"]
+        )
+        before = outcome["potential_visitors_before"]
+        after = outcome["potential_visitors_after"]
+        return (
+            f"{event['name']} has happened and today's potential demand has "
+            f"{direction} by {change_percent}% "
+            f"({before:,} to {after:,} potential visitors)!"
+        )
+    units_destroyed = outcome.get(
+        "total_units_destroyed",
+        sum(item["quantity"] for item in outcome.get("destroyed_quantities", [])),
+    )
+    return (
+        f"{event['name']} has happened and {event['effect_percent']}% of your "
+        f"inventory has been destroyed ({units_destroyed:,} units)!"
+    )
+
+
+@st.dialog("Day 3 location event", width="small", dismissible=False)
+def _show_day_three_event_popup(
+    database: str, session_id: str, player_id: str, event: dict
+) -> None:
+    """Show the stored event once until this player acknowledges it."""
+
+    if event["polarity"] == "positive":
+        st.subheader("Positive event!")
+        st.success(_day_three_event_message(event), icon="🎉")
+    else:
+        st.subheader("Negative event!")
+        st.error(_day_three_event_message(event), icon="⚠️")
+    st.write(event["explanation"])
+    if st.button(
+        "View Day 3 Results",
+        type="primary",
+        key=f"v2_ack_day_three_event_{player_id}",
+        use_container_width=True,
+    ):
+        try:
+            v2_storage.acknowledge_day_three_event_popup(
+                database, session_id, player_id
+            )
+        except sqlite3.Error:
+            st.error("The event could not be acknowledged. Please try again.")
+        else:
+            st.rerun()
+
+
 def _show_management_dashboard(
     progress: dict, history: list[dict], total_days: int, can_trade: bool
 ) -> None:
@@ -457,6 +514,13 @@ def _show_player_cafe(
         )
     if section == "Dashboard":
         _show_management_dashboard(progress, history, last_day, can_trade)
+        event = v2_storage.load_pending_day_three_event_popup(
+            database, session["session_id"], player["player_id"]
+        )
+        if event is not None:
+            _show_day_three_event_popup(
+                database, session["session_id"], player["player_id"], event
+            )
         return
     if section == "Café Setup":
         _show_menu_setup(database, session, player, progress, can_trade)
@@ -1126,7 +1190,7 @@ def render() -> None:
     if next_section is not None:
         st.session_state["v2_main_navigation"] = next_section
 
-    page = st.selectbox(
+    page = st.sidebar.selectbox(
         "Game section",
         [
             "Host / Join Game",

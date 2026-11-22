@@ -181,7 +181,7 @@ def test_leaderboard_page_shows_negative_result_and_manual_refresh_is_read_only(
     app.text_input[1].set_value(player["nickname"])
     app.text_input[2].set_value(player["recovery_credential"])
     app.button[0].click().run()
-    app.selectbox[0].set_value("Leaderboard").run()
+    next(item for item in app.sidebar.selectbox if item.label == "Game section").set_value("Leaderboard").run()
 
     assert not app.exception
     assert any("Provisional leaderboard" in item.value for item in app.info)

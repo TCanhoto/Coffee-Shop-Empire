@@ -196,7 +196,7 @@ progress = game.resume_player_by_credentials(database, code, nickname, credentia
 history = game.load_player_trade_history(database, progress['session_id'], progress['player_id'])
 assert progress['cash_cents'] == history[0]['cash_cents_after']
 assert progress['current_day'] == 2
-assert len(history) == 1 and history[0]['event'] is not None
+assert len(history) == 1 and history[0]['event'] is None
 print('resumed')
 """
     result = subprocess.run(

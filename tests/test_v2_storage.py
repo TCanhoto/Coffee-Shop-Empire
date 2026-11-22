@@ -795,12 +795,12 @@ def test_repeated_stale_day_submission_does_not_complete_the_next_day(tmp_path):
             "SELECT status FROM player_day_events WHERE session_id = ? AND player_id = ?",
             (session["session_id"], player["player_id"]),
         ).fetchall()
+    assert event_rows == []
+    with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM session_event_plans WHERE session_id = ?",
             (session["session_id"],),
-        ).fetchone()[0] == 1
-    assert sum(status == "occurred" for (status,) in event_rows) == 1
-    assert len(event_rows) in {1, 2}
+        ).fetchone()[0] == 0
 
 
 def test_two_simultaneous_day_submissions_commit_exactly_one_result(tmp_path):
@@ -838,12 +838,12 @@ def test_two_simultaneous_day_submissions_commit_exactly_one_result(tmp_path):
             "SELECT status FROM player_day_events WHERE session_id = ? AND player_id = ?",
             (session["session_id"], player["player_id"]),
         ).fetchall()
+    assert event_rows == []
+    with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM session_event_plans WHERE session_id = ?",
             (session["session_id"],),
-        ).fetchone()[0] == 1
-    assert sum(status == "occurred" for (status,) in event_rows) == 1
-    assert len(event_rows) in {1, 2}
+        ).fetchone()[0] == 0
 
 
 def test_invalid_waiting_and_price_actions_leave_player_data_unchanged(tmp_path):
