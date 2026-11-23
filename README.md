@@ -4,7 +4,15 @@ Coffee Shop Empire is a café management simulation set in Lisbon. Players choos
 
 **Course:** Introduction to Programming, Nova SBE
 
-**Deployed application:** [ctnovasbe.streamlit.app](https://ctnovasbe.streamlit.app)
+### Playing Online vs. Running Locally
+
+**Deployed application (recommended for multiplayer across devices):** [ctnovasbe.streamlit.app](https://ctnovasbe.streamlit.app/)
+
+This is the recommended way to play Coffee Shop Empire, especially in Multiplayer mode. The application is hosted on Streamlit Community Cloud and is accessible over the internet, allowing players on different computers, smartphones, and networks to join the same multiplayer session using a shared session code.
+
+**Local execution:** When running the application locally, Streamlit starts a server on your own computer (typically at `http://localhost:8501`). Multiplayer functionality is still available, but the `localhost` address is accessible only from the computer running the application. Connecting from other devices requires additional network configuration.
+
+**For the easiest multiplayer experience across multiple devices or different networks, use the deployed application link above.**
 
 ## Team
 
