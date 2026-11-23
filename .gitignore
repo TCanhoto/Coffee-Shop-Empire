@@ -1,5 +1,7 @@
 # Python environments and caches
 .venv/
+venv/
+env/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -19,6 +21,10 @@ __pycache__/
 !.env.example
 secrets.toml
 .streamlit/secrets.toml
+*.pem
+*.key
+*.p12
+*.pfx
 
 # Temporary files and operating-system metadata
 *.tmp
