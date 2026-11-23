@@ -1,95 +1,35 @@
-# Campus Tycoon V2 scope
+# Coffee Shop Empire — current V2 scope
 
-## Objective
+Coffee Shop Empire (previously Campus Tycoon) is a Lisbon café-management simulation built with Python, Streamlit, and SQLite. This document describes the implemented application, rather than the original V2 roadmap.
 
-V2 will let several people join a shared game and independently manage cafés in Lisbon. They will compete on an agreed final profit measure. Keep the project understandable for a programming beginner and keep Python, Streamlit, SQLite, pytest, and uv.
+## Current game modes
 
-## Planned core features
+The version selector offers two modes, and both use the current shared café-game implementation in `v2_interface.py`, `business_logic.py`, `demand_engine.py`, and `v2_storage.py`:
 
-- Multiplayer sessions with a host, a six-character joining code, and independent players.
-- Eight café locations with agreed rent, foot traffic, and customer composition.
-- Five customer personas with different product preferences and price sensitivity.
-- An expanded product catalogue; each player's menu can contain no more than 5 products.
-- Deterministic demand based on agreed location, persona, product, and price rules.
-- Improved daily progression, dashboard, leaderboard, final player performance report, and mobile-friendly screens.
+- **Version 1.0 — Single Player:** creates or resumes one player's saved café without host/join steps or a multiplayer lobby.
+- **Version 2.0 — Multiplayer:** a host creates a session, players join or resume with credentials, and each player manages an independent café. Players share a session leaderboard.
 
-Optional later work, only after the core game is accepted: marketing campaigns, market research reports, and café space customisation.
+The original V1 application and its storage/business rules remain in the repository for historical and compatibility purposes. They are not the implementation selected by the current Version 1.0 menu option.
 
-Out of scope: random demand, a What-if panel, AI-controlled competitors, advanced financial accounting, paid AI APIs, and unnecessary technologies. Location events are an approved exception to the original no-events scope; demand itself remains deterministic.
+## Implemented gameplay
 
-## Intentional changes from V1
+- **Four fictional Lisbon locations:** Carcavelos / NOVA SBE (€30 rent/day; 1,200 passers-by), Príncipe Real (€85; 1,500), Belém (€125; 2,500), and Chiado (€165; 3,000). Each location has a fixed persona mix. A confirmed lease is locked for that player's game.
+- **Five customer personas and 12 products:** the catalogue and approved product-persona affinity scores are defined in `content.py`. Each player's active menu has at most five distinct products and must include a drink. Removing an item from the menu preserves its stock.
+- **Purchasing and prices:** purchases and price changes are player-specific, validated, and saved. Money is represented in integer cents.
+- **Deterministic demand:** 10% of location foot traffic becomes potential visitors. Persona mix, affinity, price sensitivity, menu availability, and stock determine demand and service. There is no substitution when a preferred product is unavailable. Demand calculations themselves have no randomness.
+- **Daily play:** hosts configure a game length and starting cash (defaults: seven days and €2,000). Each player completes days independently. Revenue is added to cash, stock is reduced by units sold, and that player's saved lease rent is charged once per completed day. If cash cannot cover rent, available cash is paid, the unpaid balance is forgiven, cash becomes €0, and that player's game ends as bankrupt.
+- **Day 3 location events:** exactly one positive or negative event is selected for each player who completes Day 3 in a game configured for at least three days. No event is applied on another day, and a saved event cannot be applied twice. Events adjust potential demand or destroy inventory according to the event definition.
+- **Review and competition:** players have a personal dashboard and final report. Multiplayer players can view a session-specific leaderboard. The final game result is final cash minus that player's starting cash; remaining inventory has no recovery value.
+- **Persistence and navigation:** accepted game actions are stored in SQLite. The interface supports host, join, resume, setup, daily play, dashboard, leaderboard, and final report flows as applicable to the mode.
 
-V1 has one local run, €100 starting cash, three products, five trading days, price-tier demand, and final value calculated from cash plus remaining stock value. V2 is expected to replace the single-run model and may change starting cash, game length, demand, and final scoring. The group must approve exact values and formulas before those rules are implemented. Preserve V1 code, data, and historical tests; do not silently change old expectations.
+## Storage and deployment boundary
 
-## Phase 1A delivered boundary
+The current game uses the local SQLite database `campus_tycoon_v2.sqlite3`. Local SQLite files are suitable for the project's small-group use. On Streamlit Community Cloud, files on the app's local filesystem are not guaranteed to survive restarts or redeployments; durable cloud persistence has not been verified. The V1 database is separate and is not automatically converted into a V2 save.
 
-Phase 1A adds SQLite storage for multiple sessions and players, independent cash/inventory/prices/day/history, and a recovery credential. It uses a separate `campus_tycoon_v2.sqlite3` file. The existing V1 app, V1 database, and V1 business rules remain the live application. No host/join screens, locations, personas, new demand rules, or leaderboard are part of Phase 1A.
+## Exclusions
 
-## Phase 1B delivered boundary
+The current game has no marketing or research systems, upgrades, competing café simulations, demand forecasting, What-if panel, borrowing, or advanced accounting. The game does not use paid external services. Shared host-controlled resolution of every player's daily turn is also not implemented; each player's day is completed independently.
 
-Phase 1B adds mobile-friendly Host Game, Join Game, and Resume Game screens under the V2 choice in the app's version selector. Hosts choose 1–30 trading days (default 7) and €1–€10,000 starting cash (default €2,000). The limits are intentionally broad for classroom sessions while preventing zero or implausibly large setup values. Creating a game returns a six-character join code and a separate random host credential. The host credential is stored only as a SHA-256 hash and is required by the storage function to start the session.
+## Historical planning note
 
-Players join a waiting session with a non-empty nickname and receive a random recovery credential once; only its hash is saved. A player can resume with the session code, nickname, and recovery credential. A host can restore host controls using the session code and separate host credential. Nicknames are unique within one session, case-insensitively after trimming. Players see a public nickname-only waiting room; the host can start only after at least one player has joined. New joins are rejected after the session leaves `waiting`. Streamlit session state holds the current browser's player identity and the host's private control credential; it is not a substitute for the SQLite records. A host may also join as a normal player using Join Game.
-
-The V1 dashboard and historical behavior remain available in the version selector.
-
-## Phase 1C delivered boundary
-
-Each joined player can manage an independent café after the host starts the session. Players reuse the V1 catalogue, integer-cent money calculations, and deterministic price-tier demand. Cash, stock, prices, day progression, and history stay scoped to the player's session and player IDs. Each player advances independently through the number of days configured by the host. A player who finishes cannot buy or trade more; the shared session finishes once all players finish.
-
-Every day completion submits the day number shown by that browser. Inside a `BEGIN IMMEDIATE` transaction, storage compares that number with the saved current day before calculating or writing. A stale submission from another tab or a repeated click is rejected rather than applied to the next day. The database also has a unique completed-day key for each session, player, and day. Waiting players receive a clear message and cannot buy, change prices, or trade before the host starts.
-
-## Step 2.1 delivered boundary — Lisbon location selection
-
-After the host starts the game, each player sees a Day 0 setup screen with four location cards: Carcavelos / Nova SBE, Chiado, Príncipe Real, and Belém. The cards show a short description, daily foot traffic, and daily rent. Persona percentages are saved as internal location data and are not shown to players. A browser-only pending choice is saved to SQLite only when the player presses **Sign the lease**. The confirmed location is stored against that player's session and player IDs, is locked against replacement, and survives app restarts. Players in the same session may select different locations.
-
-Trading is rejected until that player has confirmed a location. Step 2.4 uses this saved location for deterministic demand. The supplied location values are fictional gameplay values. Step 2.5 charges the selected location's rent once per completed day.
-
-## Step 2.2 delivered boundary — personas, catalogue, and player menus
-
-`content.py` contains the five approved persona descriptions and price-sensitivity labels, the approved 12 products with categories and cent-based costs/reference prices, and the approved 0/1/3 affinity matrix. Step 2.4 uses this affinity data in the approved demand engine.
-
-Each player begins with a valid starter menu of Bica, Galão, and Pastel de nata, and can edit it for the current upcoming day. A saved menu can contain between 1 and 5 distinct products and must include a drink. Menu records are scoped to the player's session and player IDs. Purchasing, setting prices, and trading apply only to active menu products. Removing a product leaves its inventory untouched; its stock is shown as off-menu stock and can be sold again if the product is re-added. Menu submissions include the displayed upcoming day so a stale page cannot change the menu after that day has been completed. Legacy saves with larger menus remain intact until the player reduces and saves them.
-
-## Step 2.4 delivered boundary — deterministic demand engine
-
-`demand_engine.py` contains a pure V2 demand function. It uses location traffic and persona mix, the approved affinity matrix and sensitivity tiers, the active menu and read-only stock quantities. It has no database or randomness dependency and does not mutate player state. `business_logic.py` separately calculates sales, cash and rent settlement; `v2_storage.py` commits those results with day progression in one transaction. The rules and rounding examples are documented in `docs/V2_DEMAND_MODEL.md` and covered by automated tests.
-
-## Daily gameplay and financial outcomes
-
-The lobby defaults to €2,000 and 7 days, while respecting host-selected settings. Each completed day charges the player's selected location rent once after sales. Purchases already deduct inventory cost, so COGS is reported but not charged a second time at sale. If cash after sales is below rent, all remaining cash is paid toward rent, the player ends at €0 and bankrupt; unpaid rent is forgiven with no debt. Other players continue. Final score is final cash minus starting cash; unsold inventory has no recovery value. The shared session finishes when every player has completed all configured days or gone bankrupt.
-
-## Step 3.1 delivered boundary — multiplayer leaderboard
-
-The Leaderboard page shows only players from the current host/player session. It orders by current game result (cash minus starting cash), then total revenue, then a stable internal player identifier. The identifier is not displayed. Each row shows rank, nickname, café location, completed days, result, and Playing/Finished status. Results remain labelled provisional until the session has finished. Refresh is manual and does not modify game data.
-
-## Step 3.2 delivered boundary — management dashboard
-
-Each player sees a dashboard built from their own current progress and saved daily history. It shows available cash, day progress, accumulated revenue, current game result (current cash minus starting cash), customers served, and inventory. Charts show completed-day revenue, closing cash from Day 0 through completed days, and units sold by product. Best-selling products and chronological daily results are listed. Empty histories show guidance and current inventory without empty charts. Dashboard data is retrospective/current. The pre-trading Today screen can show broad demand estimate ranges; it does not forecast profit or provide What-if tools.
-
-## Step 3.3 delivered boundary — final performance report
-
-Finished players (including players whose game ended through bankruptcy) receive a report based on their own saved results. It shows final result, current/final rank and whether that rank is provisional, revenue, customers, best and worst offered products by gross profit, remaining stock at purchase cost, stock-limited lost product units, and the best-served persona when every completed day has saved persona counts. Recommendations are generated only from saved sales and inventory evidence. The unsold-stock threshold is 10% of starting cash; repeated stockout and zero-demand recommendations require evidence on at least two days. Old records without saved persona service counts remain marked unavailable. Daily prices and product-level demand by persona are not stored, so pricing-causality and low-affinity claims are explicitly unavailable.
-
-## Step 3.4 delivered boundary — UI and mobile experience
-
-The multiplayer interface is organized into Host / Join Game, Café Setup, Today, Dashboard, Leaderboard, and Final Report. Host, join, and resume are choices inside the entry section. Café Setup contains location selection and saved menu editing; Today contains pricing, purchasing, progress, and daily results. Dashboard, leaderboard, and final report are separate views. A warm coffee-and-cream theme with terracotta actions, product/location emojis, compact metrics, and mobile spacing is applied with Streamlit CSS only. Completing a day now requires a second explicit confirmation; cancelling leaves game data unchanged. Existing session and player storage remain authoritative, so navigation does not discard accepted choices.
-
-## Task C3 / D2 — Day 3 location events
-
-Each player who completes Day 3 in a game of at least three days receives exactly one randomly selected positive or negative event for their own confirmed location. Selection happens independently per player, inside the Day 3 trade transaction; no event is assigned or revealed before that transaction. No event occurs on other days or in games shorter than three days. The existing demand engine is unchanged: demand events adjust that day's potential visitors before calling it, while inventory-loss events round losses per product and apply after purchases but before sales. Events affect the player's full inventory, including products temporarily off the menu, but only active-menu products are eligible for sales. The trade, event outcome, stock changes, and history are saved atomically.
-
-After a successful Day 3 trade, the Dashboard automatically opens a positive/negative event dialog from the saved outcome. Its acknowledgement is saved separately and does not change game finances. The Dashboard keeps the historical event record available. During migration, unapplied legacy assignments outside Day 3 are removed; completed trades and occurred legacy events are retained unchanged. Previously completed Day 3 records are not replayed or shown as new events.
-
-## Suggested next stages
-
-1. **Phase 1A — Multiplayer data foundation:** sessions, player records, scoped inventory/prices/results, persistence, and recovery credential. (Implemented.)
-2. **Phase 1B — Host and join flow:** create a session, share/join by code, validate host actions, and rejoin a player securely. (Implemented.)
-3. **Phase 1C — Independent café gameplay:** player-scoped buying, pricing, daily results, and protected day completion using the V1 rules. (Implemented.)
-4. **Phase 2 — Locations and menu catalogue:** eight locations, expanded products, and the 5-item limit.
-5. **Phase 3 — Persona-based demand:** deterministic demand engine (approved and implemented).
-6. **Phase 4 — Shared session progression:** host-controlled shared day resolution and inactive-player rules.
-7. **Phase 5 — Leaderboard and final report:** session-specific leaderboard and per-player final report implemented.
-8. **Phase 6 — Responsive dashboard and acceptance:** management dashboard implemented; continue with manual mobile review and end-to-end acceptance.
-
-Optional later work: research, marketing, or customisation only after separate approval.
+Earlier V2 planning documents considered eight locations, retaining the old V1 interface as the active Version 1.0 experience, and having the host resolve a shared day. Those were plans, not the current application scope. The implemented game has four locations, both visible modes use the shared current gameplay engine, and player day progression is independent.
