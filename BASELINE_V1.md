@@ -1,6 +1,10 @@
+# Historical baseline — original Campus Tycoon V1
+
+> This document records the original Campus Tycoon V1 implementation and is not the specification for the current Coffee Shop Empire application. Current Version 1.0 Single Player and Version 2.0 Multiplayer use the shared current game implementation. The **42 passed** result below is the historical V1 baseline test result, not the current test count. No historical date or commit is asserted here. For the current project, see [README.md](README.md) and [V2_ARCHITECTURE.md](docs/V2_ARCHITECTURE.md).
+
 # Campus Tycoon — Baseline V1
 
-This document records the current Campus Tycoon version as a comparison point for future group-project changes. It describes the implementation and tests in this repository; the automated test results below were verified with the test command shown.
+This document records the original Campus Tycoon V1 implementation as a comparison point for later group-project changes. Its feature descriptions and automated test results are evidence of that historical baseline, not the current application.
 
 ## Implemented features
 

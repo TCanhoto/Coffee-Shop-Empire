@@ -1,3 +1,7 @@
+# Historical document — original Campus Tycoon V1
+
+> This document records the original Campus Tycoon V1 requirements and is not the specification for the current Coffee Shop Empire application. Current Version 1.0 Single Player and Version 2.0 Multiplayer use the shared current game implementation. For the current project, see [README.md](../README.md) and [V2_ARCHITECTURE.md](V2_ARCHITECTURE.md).
+
 # Campus Tycoon — Business Requirements
 
 **Version:** 1.0  
